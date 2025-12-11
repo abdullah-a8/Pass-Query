@@ -1,7 +1,12 @@
 [package]
-name = "pp"
+name = "pq"
 version = "0.1.0"
 edition = "2024"
+description = "Fast fuzzy password search for Proton Pass CLI"
+repository = "https://github.com/abdullah-a8/Pass-Query"
+license = "MIT"
+keywords = ["proton-pass", "password", "cli", "fzf", "clipboard"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 tokio = { version = "1", features = ["process", "rt-multi-thread", "macros", "io-util"] }

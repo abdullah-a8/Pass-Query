@@ -1,47 +1,52 @@
-# pp - Proton Pass Search
+# pq - Pass Query
 
-⚡ **BLAZINGLY fast** password search for Proton Pass CLI with intelligent caching.
+Fast fuzzy password search for Proton Pass CLI.
 
-## Performance
+## Features
 
-- **First search**: 6-10 seconds (fetches from pass-cli)
-- **Cached searches**: ~2-3 seconds (fast search + fresh password fetch)
-- **Cache TTL**: 5 minutes (auto-refresh)
-- **10x faster** than original bash script!
-
-## Security
-
-- ✅ **Passwords NEVER cached** - always fetched fresh
-- ✅ Cache only stores item titles (not sensitive)
-- ✅ Secure by default - no passwords on disk
-
-## Usage
-
-```bash
-# Basic search (uses cache if available)
-pp <search-term>
-
-# Force refresh cache (after adding new passwords)
-pp --refresh <search-term>
-```
-
-Searches all vaults with intelligent caching and prints the password to stdout.
+- **Fuzzy Search** — Uses fzf for interactive fuzzy selection when multiple items match
+- **Auto Clipboard** — Copies username first, then password after 3 seconds (Wayland)
+- **Smart Caching** — First search takes ~8-10s, subsequent searches <1s (5-minute cache)
+- **Parallel Search** — Searches all vaults concurrently for speed
 
 ## Requirements
 
 - [pass-cli](https://protonpass.github.io/pass-cli/) installed and logged in
-- Rust 1.70+
+- [fzf](https://github.com/junegunn/fzf) for fuzzy selection
+- [wl-clipboard](https://github.com/bugaevc/wl-clipboard) for Wayland clipboard support
+- Rust 1.85+ (for building from source)
 
 ## Installation
 
-```bash
+```
+cargo install --git https://github.com/abdullah-a8/Pass-Query
+```
+
+Or build from source:
+
+```
+git clone https://github.com/abdullah-a8/Pass-Query
+cd pq
 cargo install --path .
 ```
 
-## Features
+## Usage
 
-- ✅ **Lightning fast**: <1 second for cached searches
-- ✅ **Smart caching**: Auto-expires after 5 minutes
-- ✅ **Parallel search**: 10 concurrent vault queries
-- ✅ **Auto-fallback**: Works even if cache fails
-- ✅ **Secure**: Cache stored in user directory
+```
+pq <search-term>         Search and copy credentials to clipboard
+pq -p <search-term>      Print credentials to stdout instead
+pq -r <search-term>      Force refresh cache before searching
+pq --help                Show help
+```
+
+## How It Works
+
+1. Searches all Proton Pass vaults in parallel
+2. If multiple matches found, opens fzf for fuzzy selection
+3. Copies username to clipboard
+4. Waits 3 seconds for you to paste
+5. Copies password to clipboard
+
+## License
+
+MIT

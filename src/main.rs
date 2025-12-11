@@ -13,7 +13,7 @@ mod selection;
 
 /// Fast Proton Pass password search with intelligent caching
 #[derive(Parser)]
-#[command(name = "pp")]
+#[command(name = "pq")]
 #[command(about = "Search Proton Pass and copy credentials to clipboard")]
 #[command(version)]
 struct Cli {
