@@ -72,6 +72,46 @@ pub async fn get_password(vault_name: &str, item_title: &str) -> Result<String> 
     let password = String::from_utf8(output.stdout)
         .context("Invalid UTF-8 in password output")?;
 
-    // Trim any trailing newline
     Ok(password.trim().to_string())
+}
+
+/// Get username for a specific item using `pass-cli item view`
+pub async fn get_username(vault_name: &str, item_title: &str) -> Result<String> {
+    // Try username field first
+    let output = Command::new("pass-cli")
+        .args([
+            "item", "view",
+            "--vault-name", vault_name,
+            "--item-title", item_title,
+            "--field", "username"
+        ])
+        .output()
+        .await?;
+
+    if output.status.success() {
+        let username = String::from_utf8(output.stdout)?.trim().to_string();
+        if !username.is_empty() {
+            return Ok(username);
+        }
+    }
+
+    // Fallback to email field
+    let output = Command::new("pass-cli")
+        .args([
+            "item", "view",
+            "--vault-name", vault_name,
+            "--item-title", item_title,
+            "--field", "email"
+        ])
+        .output()
+        .await?;
+
+    if output.status.success() {
+        let email = String::from_utf8(output.stdout)?.trim().to_string();
+        if !email.is_empty() {
+            return Ok(email);
+        }
+    }
+
+    anyhow::bail!("No username or email found")
 }

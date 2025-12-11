@@ -25,12 +25,14 @@ async fn search_vault(vault: Vault, query: String) -> Result<Vec<Match>> {
         .into_iter()
         .filter(|item| item.content.title.to_lowercase().contains(&query_lower))
         .map(|item| {
-            // Extract password from the item (works for any item type)
+            // Extract credentials from the item
+            let username = item.content.get_username();
             let password = item.content.get_password();
             
             Match {
                 title: item.content.title,
                 vault_name: vault.name.clone(),
+                username,
                 password,
             }
         })

@@ -35,7 +35,7 @@ pub struct ItemContent {
     pub content: Option<serde_json::Value>,
 }
 
-// Helper to extract password from any item type (only in memory, never cached)
+// Helper to extract fields from any item type (only in memory, never cached)
 impl ItemContent {
     pub fn get_password(&self) -> Option<String> {
         let content = self.content.as_ref()?;
@@ -47,7 +47,27 @@ impl ItemContent {
             return password.as_str().map(|s| s.to_string());
         }
         
-        // Could add other item types here (CreditCard, etc.)
+        None
+    }
+    
+    pub fn get_username(&self) -> Option<String> {
+        let content = self.content.as_ref()?;
+        
+        if let Some(login) = content.get("Login") {
+            // Try username first, then email as fallback
+            if let Some(username) = login.get("username") {
+                let u = username.as_str().unwrap_or("").to_string();
+                if !u.is_empty() {
+                    return Some(u);
+                }
+            }
+            if let Some(email) = login.get("email") {
+                let e = email.as_str().unwrap_or("").to_string();
+                if !e.is_empty() {
+                    return Some(e);
+                }
+            }
+        }
         
         None
     }
@@ -72,5 +92,6 @@ impl serde::Serialize for ItemContent {
 pub struct Match {
     pub title: String,
     pub vault_name: String,
+    pub username: Option<String>,
     pub password: Option<String>,
 }
