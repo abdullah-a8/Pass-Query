@@ -1,3 +1,4 @@
+use anyhow::Result;
 use clap::Parser;
 
 mod models;
@@ -15,7 +16,24 @@ struct Cli {
     query: String,
 }
 
-fn main() {
-    let _cli = Cli::parse();
-    println!("Hello, world!");
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    // Fetch all vaults
+    let vault_list = pass_cli::fetch_vaults().await?;
+
+    // Search all vaults in parallel
+    let matches = search::search_all_vaults(vault_list.vaults, cli.query.clone()).await?;
+
+    // Handle selection
+    let selected = selection::select_item(matches)?;
+
+    // Get password
+    let password = pass_cli::get_password(&selected.vault_name, &selected.title).await?;
+
+    // Print to stdout
+    println!("{}", password);
+
+    Ok(())
 }
