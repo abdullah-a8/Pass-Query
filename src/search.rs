@@ -1,5 +1,7 @@
 use anyhow::Result;
+use colored::Colorize;
 use futures::stream::{self, StreamExt};
+use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::cache;
 use crate::models::{Vault, Match};
@@ -46,24 +48,42 @@ async fn search_vault(vault: Vault, query: String) -> Result<Vec<Match>> {
 /// Subsequent runs: <1 second (from cache, valid for 5 minutes)
 pub async fn search_all_vaults_limited(vaults: Vec<Vault>, query: String) -> Result<Vec<Match>> {
     const MAX_CONCURRENT: usize = 10;  // Increased from 4 to 10 for faster first run
-    
+
+    let vault_count = vaults.len() as u64;
+
+    // Create progress bar
+    let pb = ProgressBar::new(vault_count);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} {msg} [{bar:40.cyan/blue}] {pos}/{len}")
+            .unwrap()
+            .progress_chars("█▓░")
+    );
+    pb.set_message("Searching vaults");
+
     let results = stream::iter(vaults)
         .map(|vault| {
             let query = query.clone();
+            let pb = pb.clone();
             async move {
-                search_vault(vault, query).await
+                let result = search_vault(vault, query).await;
+                pb.inc(1);
+                result
             }
         })
         .buffer_unordered(MAX_CONCURRENT)
         .collect::<Vec<_>>()
         .await;
 
+    // Clear progress bar
+    pb.finish_and_clear();
+
     // Collect all matches, filtering out errors
     let mut all_matches = Vec::new();
     for result in results {
         match result {
             Ok(matches) => all_matches.extend(matches),
-            Err(e) => eprintln!("Warning: vault search failed: {}", e),
+            Err(e) => eprintln!("{} vault search failed: {}", "⚠".yellow(), e.to_string().dimmed()),
         }
     }
 

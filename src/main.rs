@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use colored::Colorize;
 use std::process::{Command, Stdio};
 use std::io::Write;
 use std::time::Duration;
@@ -15,15 +16,21 @@ mod selection;
 #[derive(Parser)]
 #[command(name = "pq")]
 #[command(about = "Search Proton Pass and copy credentials to clipboard")]
+#[command(long_about = "Fast fuzzy password search for Proton Pass CLI.
+
+EXAMPLES:
+    pq reddit               Search for reddit
+    pq gmail -p             Search gmail, print to stdout
+    pq github -r            Refresh cache, search github")]
 #[command(version)]
 struct Cli {
     /// Search query (item name)
     query: String,
-    
+
     /// Force refresh cache (ignore cached data)
     #[arg(short, long)]
     refresh: bool,
-    
+
     /// Print to stdout instead of copying to clipboard
     #[arg(short, long)]
     print: bool,
@@ -33,7 +40,7 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
     let mut child = Command::new("wl-copy")
         .stdin(Stdio::piped())
         .spawn()
-        .context("Failed to run wl-copy. Is wl-clipboard installed?")?;
+        .context(format!("{} Failed to run wl-copy. Is wl-clipboard installed?\n  Install: sudo apt install wl-clipboard", "✗".red()))?;
     
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(text.as_bytes())?;
@@ -80,12 +87,12 @@ async fn main() -> Result<()> {
         // Clipboard mode: copy username then password
         if let Some(ref u) = username {
             copy_to_clipboard(u)?;
-            eprintln!("✓ Username copied!");
+            eprintln!("{} Username copied!", "✓".green());
             thread::sleep(Duration::from_millis(500));
         }
 
         copy_to_clipboard(&password)?;
-        eprintln!("✓ Password copied!");
+        eprintln!("{} Password copied!", "✓".green());
     }
 
     Ok(())
