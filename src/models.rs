@@ -95,3 +95,56 @@ pub struct Match {
     pub username: Option<String>,
     pub password: Option<String>,
 }
+
+/// Response from `pass-cli item view --output json`
+#[derive(Debug, Deserialize)]
+pub struct ItemView {
+    pub item: ItemViewItem,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ItemViewItem {
+    pub content: ItemViewContent,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ItemViewContent {
+    pub content: Option<serde_json::Value>,
+}
+
+impl ItemViewContent {
+    pub fn get_password(&self) -> Option<String> {
+        let content = self.content.as_ref()?;
+
+        if let Some(login) = content.get("Login")
+            && let Some(password) = login.get("password")
+        {
+            return password.as_str().map(|s| s.to_string());
+        }
+
+        None
+    }
+
+    pub fn get_username(&self) -> Option<String> {
+        let content = self.content.as_ref()?;
+
+        if let Some(login) = content.get("Login") {
+            // Try username first
+            if let Some(username) = login.get("username") {
+                let u = username.as_str().unwrap_or("").to_string();
+                if !u.is_empty() {
+                    return Some(u);
+                }
+            }
+            // Fallback to email
+            if let Some(email) = login.get("email") {
+                let e = email.as_str().unwrap_or("").to_string();
+                if !e.is_empty() {
+                    return Some(e);
+                }
+            }
+        }
+
+        None
+    }
+}

@@ -1,6 +1,6 @@
 [package]
 name = "pq"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Fast fuzzy password search for Proton Pass CLI"
 repository = "https://github.com/abdullah-a8/Pass-Query"

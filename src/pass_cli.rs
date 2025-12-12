@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use tokio::process::Command;
 
-use crate::models::{VaultList, ItemList};
+use crate::models::{VaultList, ItemList, ItemView};
 
 /// Fetch all vaults using `pass-cli vault list --output json`
 pub async fn fetch_vaults() -> Result<VaultList> {
@@ -48,14 +48,15 @@ pub async fn list_vault_items(vault_name: &str) -> Result<ItemList> {
     Ok(item_list)
 }
 
-/// Get password for a specific item using `pass-cli item view`
-pub async fn get_password(vault_name: &str, item_title: &str) -> Result<String> {
+/// Get both username and password in ONE call using `pass-cli item view --output json`
+/// This replaces the old approach of making 2-3 separate --field calls
+pub async fn get_item_credentials(vault_name: &str, item_title: &str) -> Result<(Option<String>, String)> {
     let output = Command::new("pass-cli")
         .args([
             "item", "view",
             "--vault-name", vault_name,
             "--item-title", item_title,
-            "--field", "password"
+            "--output", "json"
         ])
         .output()
         .await
@@ -66,52 +67,18 @@ pub async fn get_password(vault_name: &str, item_title: &str) -> Result<String> 
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Failed to get password: {}", stderr);
+        anyhow::bail!("Failed to get item: {}", stderr);
     }
 
-    let password = String::from_utf8(output.stdout)
-        .context("Invalid UTF-8 in password output")?;
+    let stdout = String::from_utf8(output.stdout)
+        .context("Invalid UTF-8 in item view output")?;
 
-    Ok(password.trim().to_string())
-}
+    let item_view: ItemView = serde_json::from_str(&stdout)
+        .context("Failed to parse item view JSON")?;
 
-/// Get username for a specific item using `pass-cli item view`
-pub async fn get_username(vault_name: &str, item_title: &str) -> Result<String> {
-    // Try username field first
-    let output = Command::new("pass-cli")
-        .args([
-            "item", "view",
-            "--vault-name", vault_name,
-            "--item-title", item_title,
-            "--field", "username"
-        ])
-        .output()
-        .await?;
+    let username = item_view.item.content.get_username();
+    let password = item_view.item.content.get_password()
+        .context("No password found in item")?;
 
-    if output.status.success() {
-        let username = String::from_utf8(output.stdout)?.trim().to_string();
-        if !username.is_empty() {
-            return Ok(username);
-        }
-    }
-
-    // Fallback to email field
-    let output = Command::new("pass-cli")
-        .args([
-            "item", "view",
-            "--vault-name", vault_name,
-            "--item-title", item_title,
-            "--field", "email"
-        ])
-        .output()
-        .await?;
-
-    if output.status.success() {
-        let email = String::from_utf8(output.stdout)?.trim().to_string();
-        if !email.is_empty() {
-            return Ok(email);
-        }
-    }
-
-    anyhow::bail!("No username or email found")
+    Ok((username, password))
 }

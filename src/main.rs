@@ -65,10 +65,8 @@ async fn main() -> Result<()> {
     let (username, password) = match (&selected.username, &selected.password) {
         (Some(u), Some(p)) => (Some(u.clone()), p.clone()),
         _ => {
-            // Fetch fresh using pass-cli
-            let pwd = pass_cli::get_password(&selected.vault_name, &selected.title).await?;
-            let user = pass_cli::get_username(&selected.vault_name, &selected.title).await.ok();
-            (user, pwd)
+            // Fetch fresh using single pass-cli call
+            pass_cli::get_item_credentials(&selected.vault_name, &selected.title).await?
         }
     };
 
@@ -82,10 +80,10 @@ async fn main() -> Result<()> {
         // Clipboard mode: copy username then password
         if let Some(ref u) = username {
             copy_to_clipboard(u)?;
-            eprintln!("✓ Username copied! Paste now, password in 3s...");
-            thread::sleep(Duration::from_secs(3));
+            eprintln!("✓ Username copied!");
+            thread::sleep(Duration::from_millis(500));
         }
-        
+
         copy_to_clipboard(&password)?;
         eprintln!("✓ Password copied!");
     }
