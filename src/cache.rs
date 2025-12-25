@@ -80,11 +80,20 @@ pub fn set_cached_vault(vault_name: &str, items: &ItemList) -> Result<()> {
 
     let timestamp = get_current_timestamp();
 
+    // Prepare items for caching: extract and store usernames
+    let mut items_to_cache = items.clone();
+    for item in &mut items_to_cache.items {
+        // Extract username from content and store in cached_username field
+        if item.cached_username.is_none() {
+            item.cached_username = item.content.get_username();
+        }
+    }
+
     // Update or add this vault's cache
     let mut found = false;
     for cached_vault in &mut cache.vaults {
         if cached_vault.vault_name == vault_name {
-            cached_vault.items = items.clone();
+            cached_vault.items = items_to_cache.clone();
             cached_vault.timestamp = timestamp;
             found = true;
             break;
@@ -94,7 +103,7 @@ pub fn set_cached_vault(vault_name: &str, items: &ItemList) -> Result<()> {
     if !found {
         cache.vaults.push(CachedVault {
             vault_name: vault_name.to_string(),
-            items: items.clone(),
+            items: items_to_cache,
             timestamp,
         });
     }

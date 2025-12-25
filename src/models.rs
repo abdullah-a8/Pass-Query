@@ -24,6 +24,9 @@ pub struct ItemList {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Item {
     pub content: ItemContent,
+    // Cache username separately (safe to cache, unlike passwords)
+    #[serde(default)]
+    pub cached_username: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -84,6 +87,18 @@ impl serde::Serialize for ItemContent {
         state.serialize_field("title", &self.title)?;
         // Deliberately skip 'content' field - no passwords in cache!
         state.end()
+    }
+}
+
+impl Item {
+    /// Get username from either cached value or by extracting from content
+    pub fn get_username(&self) -> Option<String> {
+        // Prefer cached username if available
+        if let Some(ref username) = self.cached_username {
+            return Some(username.clone());
+        }
+        // Otherwise extract from content (when data is fresh from pass-cli)
+        self.content.get_username()
     }
 }
 

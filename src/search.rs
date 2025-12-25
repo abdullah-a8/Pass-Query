@@ -28,7 +28,8 @@ async fn search_vault(vault: Vault, query: String) -> Result<Vec<Match>> {
         .filter(|item| item.content.title.to_lowercase().contains(&query_lower))
         .map(|item| {
             // Extract credentials from the item
-            let username = item.content.get_username();
+            // Use Item::get_username() which checks cached_username first
+            let username = item.get_username();
             let password = item.content.get_password();
             
             Match {
