@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
-use std::process::{Command, Stdio};
 use std::io::Write;
-use std::time::Duration;
+use std::process::{Command, Stdio};
 use std::thread;
+use std::time::Duration;
 
 mod cache;
 mod models;
@@ -41,11 +41,11 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
         .stdin(Stdio::piped())
         .spawn()
         .context(format!("{} Failed to run wl-copy. Is wl-clipboard installed?\n  Install: sudo apt install wl-clipboard", "✗".red()))?;
-    
+
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(text.as_bytes())?;
     }
-    
+
     child.wait()?;
     Ok(())
 }

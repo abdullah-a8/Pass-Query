@@ -19,9 +19,7 @@ pub fn select_item(matches: Vec<Match>) -> Result<Match> {
                 .iter()
                 .enumerate()
                 .map(|(i, m)| {
-                    let username_display = m.username
-                        .as_deref()
-                        .unwrap_or("(no username)");
+                    let username_display = m.username.as_deref().unwrap_or("(no username)");
 
                     format!(
                         "{}|{} {} {} {}",

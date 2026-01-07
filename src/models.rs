@@ -34,7 +34,7 @@ pub struct ItemContent {
     pub title: String,
     // Don't serialize 'content' - keeps passwords out of cache!
     #[serde(default)]
-    #[serde(skip_serializing)]  // ← Never write passwords to cache
+    #[serde(skip_serializing)] // ← Never write passwords to cache
     pub content: Option<serde_json::Value>,
 }
 
@@ -42,20 +42,20 @@ pub struct ItemContent {
 impl ItemContent {
     pub fn get_password(&self) -> Option<String> {
         let content = self.content.as_ref()?;
-        
+
         // Try to extract password from Login type
         if let Some(login) = content.get("Login")
             && let Some(password) = login.get("password")
         {
             return password.as_str().map(|s| s.to_string());
         }
-        
+
         None
     }
-    
+
     pub fn get_username(&self) -> Option<String> {
         let content = self.content.as_ref()?;
-        
+
         if let Some(login) = content.get("Login") {
             // Try username first, then email as fallback
             if let Some(username) = login.get("username") {
@@ -71,7 +71,7 @@ impl ItemContent {
                 }
             }
         }
-        
+
         None
     }
 }
