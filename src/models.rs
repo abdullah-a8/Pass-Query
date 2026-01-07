@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+
 use serde::{Deserialize, Serialize};
 
 /// Vault list response from `pass-cli vault list --output json`
@@ -29,13 +31,22 @@ pub struct Item {
     pub cached_username: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Deserialize, Clone)]
 pub struct ItemContent {
     pub title: String,
     // Don't serialize 'content' - keeps passwords out of cache!
     #[serde(default)]
     #[serde(skip_serializing)]  // ← Never write passwords to cache
     pub content: Option<serde_json::Value>,
+}
+
+impl Debug for ItemContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ItemContent")
+            .field("title", &self.title)
+            .field("content", &"[REDACTED]")
+            .finish()
+    }
 }
 
 // Helper to extract fields from any item type (only in memory, never cached)
@@ -109,6 +120,17 @@ pub struct Match {
     pub vault_name: String,
     pub username: Option<String>,
     pub password: Option<String>,
+}
+
+impl Debug for Match {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Match")
+            .field("title", &self.title)
+            .field("vault_name", &self.vault_name)
+            .field("username", &self.username.as_ref().map(|_| "[REDACTED]"))
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 /// Response from `pass-cli item view --output json`
