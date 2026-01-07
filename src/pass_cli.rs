@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use tokio::process::Command;
 
-use crate::models::{VaultList, ItemList, ItemView};
+use crate::models::{ItemList, ItemView, VaultList};
 
 /// Fetch all vaults using `pass-cli vault list --output json`
 pub async fn fetch_vaults() -> Result<VaultList> {
@@ -16,11 +16,10 @@ pub async fn fetch_vaults() -> Result<VaultList> {
         anyhow::bail!("pass-cli vault list failed: {}", stderr);
     }
 
-    let stdout = String::from_utf8(output.stdout)
-        .context("Invalid UTF-8 in pass-cli output")?;
+    let stdout = String::from_utf8(output.stdout).context("Invalid UTF-8 in pass-cli output")?;
 
-    let vault_list: VaultList = serde_json::from_str(&stdout)
-        .context("Failed to parse vault list JSON")?;
+    let vault_list: VaultList =
+        serde_json::from_str(&stdout).context("Failed to parse vault list JSON")?;
 
     Ok(vault_list)
 }
@@ -31,7 +30,10 @@ pub async fn list_vault_items(vault_name: &str) -> Result<ItemList> {
         .args(["item", "list", vault_name, "--output", "json"])
         .output()
         .await
-        .context(format!("Failed to execute pass-cli item list for vault '{}'", vault_name))?;
+        .context(format!(
+            "Failed to execute pass-cli item list for vault '{}'",
+            vault_name
+        ))?;
 
     // Don't fail on non-zero exit - vault might be empty or inaccessible
     // Just return empty list
@@ -39,24 +41,33 @@ pub async fn list_vault_items(vault_name: &str) -> Result<ItemList> {
         return Ok(ItemList { items: Vec::new() });
     }
 
-    let stdout = String::from_utf8(output.stdout)
-        .context("Invalid UTF-8 in pass-cli item list output")?;
+    let stdout =
+        String::from_utf8(output.stdout).context("Invalid UTF-8 in pass-cli item list output")?;
 
-    let item_list: ItemList = serde_json::from_str(&stdout)
-        .context(format!("Failed to parse item list JSON for vault '{}'", vault_name))?;
+    let item_list: ItemList = serde_json::from_str(&stdout).context(format!(
+        "Failed to parse item list JSON for vault '{}'",
+        vault_name
+    ))?;
 
     Ok(item_list)
 }
 
 /// Get both username and password in ONE call using `pass-cli item view --output json`
 /// This replaces the old approach of making 2-3 separate --field calls
-pub async fn get_item_credentials(vault_name: &str, item_title: &str) -> Result<(Option<String>, String)> {
+pub async fn get_item_credentials(
+    vault_name: &str,
+    item_title: &str,
+) -> Result<(Option<String>, String)> {
     let output = Command::new("pass-cli")
         .args([
-            "item", "view",
-            "--vault-name", vault_name,
-            "--item-title", item_title,
-            "--output", "json"
+            "item",
+            "view",
+            "--vault-name",
+            vault_name,
+            "--item-title",
+            item_title,
+            "--output",
+            "json",
         ])
         .output()
         .await
@@ -70,14 +81,16 @@ pub async fn get_item_credentials(vault_name: &str, item_title: &str) -> Result<
         anyhow::bail!("Failed to get item: {}", stderr);
     }
 
-    let stdout = String::from_utf8(output.stdout)
-        .context("Invalid UTF-8 in item view output")?;
+    let stdout = String::from_utf8(output.stdout).context("Invalid UTF-8 in item view output")?;
 
-    let item_view: ItemView = serde_json::from_str(&stdout)
-        .context("Failed to parse item view JSON")?;
+    let item_view: ItemView =
+        serde_json::from_str(&stdout).context("Failed to parse item view JSON")?;
 
     let username = item_view.item.content.get_username();
-    let password = item_view.item.content.get_password()
+    let password = item_view
+        .item
+        .content
+        .get_password()
         .context("No password found in item")?;
 
     Ok((username, password))

@@ -4,7 +4,7 @@ use futures::stream::{self, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::cache;
-use crate::models::{Vault, Match};
+use crate::models::{Match, Vault};
 use crate::pass_cli;
 
 /// Search a single vault for items matching the query (case-insensitive)
@@ -31,7 +31,7 @@ async fn search_vault(vault: Vault, query: String) -> Result<Vec<Match>> {
             // Use Item::get_username() which checks cached_username first
             let username = item.get_username();
             let password = item.content.get_password();
-            
+
             Match {
                 title: item.content.title,
                 vault_name: vault.name.clone(),
@@ -48,7 +48,7 @@ async fn search_vault(vault: Vault, query: String) -> Result<Vec<Match>> {
 /// First run: ~8-10 seconds (with 10 concurrent pass-cli processes)
 /// Subsequent runs: <1 second (from cache, valid for 5 minutes)
 pub async fn search_all_vaults_limited(vaults: Vec<Vault>, query: String) -> Result<Vec<Match>> {
-    const MAX_CONCURRENT: usize = 10;  // Increased from 4 to 10 for faster first run
+    const MAX_CONCURRENT: usize = 10; // Increased from 4 to 10 for faster first run
 
     let vault_count = vaults.len() as u64;
 
@@ -58,7 +58,7 @@ pub async fn search_all_vaults_limited(vaults: Vec<Vault>, query: String) -> Res
         ProgressStyle::default_bar()
             .template("{spinner:.green} {msg} [{bar:40.cyan/blue}] {pos}/{len}")
             .unwrap()
-            .progress_chars("█▓░")
+            .progress_chars("█▓░"),
     );
     pb.set_message("Searching vaults");
 
@@ -84,7 +84,11 @@ pub async fn search_all_vaults_limited(vaults: Vec<Vault>, query: String) -> Res
     for result in results {
         match result {
             Ok(matches) => all_matches.extend(matches),
-            Err(e) => eprintln!("{} vault search failed: {}", "⚠".yellow(), e.to_string().dimmed()),
+            Err(e) => eprintln!(
+                "{} vault search failed: {}",
+                "⚠".yellow(),
+                e.to_string().dimmed()
+            ),
         }
     }
 

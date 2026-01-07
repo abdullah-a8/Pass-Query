@@ -28,7 +28,7 @@ fn get_cache_path() -> Result<PathBuf> {
     } else {
         anyhow::bail!("Could not determine cache directory");
     };
-    
+
     Ok(cache_dir.join("pp-pass-cli").join("vault-cache.json"))
 }
 
@@ -49,7 +49,7 @@ pub fn get_cached_vault(vault_name: &str) -> Option<ItemList> {
     let cache: Cache = serde_json::from_str(&cache_data).ok()?;
 
     let current_time = get_current_timestamp();
-    
+
     for cached_vault in cache.vaults {
         if cached_vault.vault_name == vault_name {
             // Check if cache is still valid
@@ -64,7 +64,7 @@ pub fn get_cached_vault(vault_name: &str) -> Option<ItemList> {
 
 pub fn set_cached_vault(vault_name: &str, items: &ItemList) -> Result<()> {
     let cache_path = get_cache_path()?;
-    
+
     // Create cache directory if it doesn't exist
     if let Some(parent) = cache_path.parent() {
         fs::create_dir_all(parent).context("Failed to create cache directory")?;
@@ -122,4 +122,3 @@ pub fn clear_cache() -> Result<()> {
     }
     Ok(())
 }
-
