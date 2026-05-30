@@ -19,9 +19,10 @@ mod selection;
 #[command(long_about = "Fast fuzzy password search for Proton Pass CLI.
 
 EXAMPLES:
-    pq reddit               Search for reddit
+    pq reddit               Search logins for reddit
     pq gmail -p             Search gmail, print to stdout
-    pq github -r            Refresh cache, search github")]
+    pq github -r            Refresh cache, search github
+    pq aws -a               Search all item types, not just logins")]
 #[command(version)]
 struct Cli {
     /// Search query (item name)
@@ -34,6 +35,10 @@ struct Cli {
     /// Print to stdout instead of copying to clipboard
     #[arg(short, long)]
     print: bool,
+
+    /// Search all item types (default: logins only)
+    #[arg(short, long)]
+    all: bool,
 }
 
 /// Copy text to the system clipboard using the platform's native tool:
@@ -72,8 +77,10 @@ async fn main() -> Result<()> {
     // Fetch all vaults
     let vault_list = pass_cli::fetch_vaults().await?;
 
-    // Search with caching and limited concurrency (10 parallel max)
-    let mut matches = search::search_all_vaults_limited(vault_list.vaults, cli.query.clone()).await?;
+    // Search with caching and limited concurrency (10 parallel max).
+    // Default to logins only; --all includes every item type.
+    let mut matches =
+        search::search_all_vaults_limited(vault_list.vaults, cli.query.clone(), !cli.all).await?;
 
     // When several items match, fetch each one's account identifier (username/email)
     // so the picker can tell them apart. This reads only that field, never the password.

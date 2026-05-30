@@ -1,7 +1,14 @@
 use anyhow::{Context, Result};
+use colored::Colorize;
 use tokio::process::Command;
 
 use crate::models::{VaultList, ItemList, ItemView};
+
+/// Heuristic: does pass-cli stderr indicate the user simply isn't logged in?
+fn is_auth_error(stderr: &str) -> bool {
+    let s = stderr.to_lowercase();
+    s.contains("authenticated") || s.contains("no session") || s.contains("not logged in")
+}
 
 /// Fetch all vaults using `pass-cli vault list --output json`
 pub async fn fetch_vaults() -> Result<VaultList> {
@@ -9,10 +16,26 @@ pub async fn fetch_vaults() -> Result<VaultList> {
         .args(["vault", "list", "--output", "json"])
         .output()
         .await
-        .context("Failed to execute pass-cli vault list")?;
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!(
+                    "{} pass-cli not found. Install it: https://protonpass.github.io/pass-cli/",
+                    "✗".red()
+                )
+            } else {
+                anyhow::anyhow!("Failed to execute pass-cli vault list: {}", e)
+            }
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        if is_auth_error(&stderr) {
+            anyhow::bail!(
+                "{} Not logged in to Proton Pass. Run: {}",
+                "✗".red(),
+                "pass-cli login".bold()
+            );
+        }
         anyhow::bail!("pass-cli vault list failed: {}", stderr);
     }
 
@@ -126,4 +149,16 @@ pub async fn get_item_credentials(vault_name: &str, item_title: &str) -> Result<
         .context("No password found in item")?;
 
     Ok((username, password))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_authentication_errors() {
+        assert!(is_auth_error("Error: This operation requires an authenticated client"));
+        assert!(is_auth_error("Command is not logout there is no session"));
+        assert!(!is_auth_error("failed to connect to host: timed out"));
+    }
 }

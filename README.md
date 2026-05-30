@@ -35,9 +35,10 @@ cargo install --path .
 ## Usage
 
 ```
-pq <search-term>         Search and copy credentials to clipboard
+pq <search-term>         Search logins and copy credentials to clipboard
 pq -p <search-term>      Print credentials to stdout instead
 pq -r <search-term>      Force refresh cache before searching
+pq -a <search-term>      Search all item types, not just logins
 pq --help                Show help
 ```
 

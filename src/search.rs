@@ -4,12 +4,37 @@ use futures::stream::{self, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::cache;
-use crate::models::{Vault, Match};
+use crate::models::{Vault, Match, Item};
 use crate::pass_cli;
+
+/// Whether an item should appear in results: its title must contain the query
+/// (case-insensitive), and when `login_only` is set it must be a login item.
+/// Items with an unknown/empty type are kept defensively (so a future pass-cli
+/// change to the type field can never silently hide everything).
+fn item_matches(item: &Item, query_lower: &str, login_only: bool) -> bool {
+    if !item.title.to_lowercase().contains(query_lower) {
+        return false;
+    }
+    if login_only && !item.item_type.is_empty() && item.item_type != "login" {
+        return false;
+    }
+    true
+}
+
+/// Order matches deterministically by title, then vault (both case-insensitive),
+/// so the picker list is stable between runs instead of following vault-completion order.
+fn sort_matches(matches: &mut [Match]) {
+    matches.sort_by(|a, b| {
+        a.title
+            .to_lowercase()
+            .cmp(&b.title.to_lowercase())
+            .then_with(|| a.vault_name.to_lowercase().cmp(&b.vault_name.to_lowercase()))
+    });
+}
 
 /// Search a single vault for items matching the query (case-insensitive)
 /// Uses caching to speed up repeated searches
-async fn search_vault(vault: Vault, query: String) -> Result<Vec<Match>> {
+async fn search_vault(vault: Vault, query: String, login_only: bool) -> Result<Vec<Match>> {
     // Try to get from cache first
     let item_list = if let Some(cached) = cache::get_cached_vault(&vault.name) {
         cached
@@ -25,7 +50,7 @@ async fn search_vault(vault: Vault, query: String) -> Result<Vec<Match>> {
     let matches: Vec<Match> = item_list
         .items
         .into_iter()
-        .filter(|item| item.title.to_lowercase().contains(&query_lower))
+        .filter(|item| item_matches(item, &query_lower, login_only))
         .map(|item| Match {
             title: item.title,
             vault_name: vault.name.clone(),
@@ -40,7 +65,7 @@ async fn search_vault(vault: Vault, query: String) -> Result<Vec<Match>> {
 /// Search all vaults with LIMITED concurrency and caching for best performance
 /// First run: ~8-10 seconds (with 10 concurrent pass-cli processes)
 /// Subsequent runs: <1 second (from cache, valid for 5 minutes)
-pub async fn search_all_vaults_limited(vaults: Vec<Vault>, query: String) -> Result<Vec<Match>> {
+pub async fn search_all_vaults_limited(vaults: Vec<Vault>, query: String, login_only: bool) -> Result<Vec<Match>> {
     const MAX_CONCURRENT: usize = 10;  // Increased from 4 to 10 for faster first run
 
     let vault_count = vaults.len() as u64;
@@ -60,7 +85,7 @@ pub async fn search_all_vaults_limited(vaults: Vec<Vault>, query: String) -> Res
             let query = query.clone();
             let pb = pb.clone();
             async move {
-                let result = search_vault(vault, query).await;
+                let result = search_vault(vault, query, login_only).await;
                 pb.inc(1);
                 result
             }
@@ -81,6 +106,9 @@ pub async fn search_all_vaults_limited(vaults: Vec<Vault>, query: String) -> Res
         }
     }
 
+    // Deterministic order so the picker is stable across runs.
+    sort_matches(&mut all_matches);
+
     Ok(all_matches)
 }
 
@@ -98,4 +126,59 @@ pub async fn enrich_with_accounts(matches: Vec<Match>) -> Vec<Match> {
         .buffered(MAX_CONCURRENT)
         .collect::<Vec<_>>()
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::Item;
+
+    fn item(title: &str, item_type: &str) -> Item {
+        Item {
+            title: title.to_string(),
+            item_type: item_type.to_string(),
+        }
+    }
+
+    fn m(title: &str, vault: &str) -> Match {
+        Match {
+            title: title.to_string(),
+            vault_name: vault.to_string(),
+            item_type: "login".to_string(),
+            account: None,
+        }
+    }
+
+    #[test]
+    fn item_matches_filters_by_title_case_insensitively() {
+        assert!(item_matches(&item("Reddit", "login"), "red", false));
+        assert!(!item_matches(&item("GitHub", "login"), "red", false));
+    }
+
+    #[test]
+    fn login_only_excludes_non_login_types() {
+        assert!(!item_matches(&item("Shared Note", "note"), "note", true));
+        assert!(item_matches(&item("Shared Note", "note"), "note", false));
+        assert!(item_matches(&item("My Account", "login"), "account", true));
+    }
+
+    #[test]
+    fn login_only_keeps_items_with_unknown_type() {
+        // Defensive: if pass-cli stops sending item_type, don't hide everything.
+        assert!(item_matches(&item("Mystery", ""), "myst", true));
+    }
+
+    #[test]
+    fn sort_matches_orders_by_title_then_vault() {
+        let mut v = vec![m("reddit", "Work"), m("github", "Personal"), m("reddit", "Personal")];
+        sort_matches(&mut v);
+        let order: Vec<_> = v
+            .iter()
+            .map(|x| (x.title.as_str(), x.vault_name.as_str()))
+            .collect();
+        assert_eq!(
+            order,
+            vec![("github", "Personal"), ("reddit", "Personal"), ("reddit", "Work")]
+        );
+    }
 }
