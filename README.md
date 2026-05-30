@@ -5,7 +5,7 @@
 ## Features
 
 - **Fuzzy Search** — Uses fzf for interactive fuzzy selection when multiple items match
-- **Auto Clipboard** — Copies username first, then password after 0.5 seconds (Wayland)
+- **Auto Clipboard** — Copies username first, then password after 0.5 seconds (`pbcopy` on macOS, `wl-copy` on Linux/Wayland)
 - **Smart Caching** — First search takes ~8-10s, subsequent searches <1s (5-minute cache)
 - **Secure Caching** — Only item titles are cached, never passwords or credentials
 - **Parallel Search** — Searches up to 10 vaults concurrently with progress indicators
@@ -13,9 +13,9 @@
 
 ## Requirements
 
-- [pass-cli](https://protonpass.github.io/pass-cli/) installed and logged in
-- [fzf](https://github.com/junegunn/fzf) for fuzzy selection
-- [wl-clipboard](https://github.com/bugaevc/wl-clipboard) for Wayland clipboard support
+- [pass-cli](https://protonpass.github.io/pass-cli/) installed and logged in (`pass-cli login`)
+- [fzf](https://github.com/junegunn/fzf) for fuzzy selection (`brew install fzf` on macOS, `sudo apt install fzf` on Linux)
+- A clipboard tool: `pbcopy` (built into macOS) or [wl-clipboard](https://github.com/bugaevc/wl-clipboard) / `wl-copy` on Linux/Wayland
 - Rust 1.85+ (for building from source)
 
 ## Installation
@@ -45,7 +45,7 @@ pq --help                Show help
 
 1. Searches all Proton Pass vaults in parallel (up to 10 concurrent)
 2. Uses cached vault listings for speed (only titles cached, never passwords)
-3. If multiple matches found, opens fzf for fuzzy selection
+3. If multiple matches are found, fetches each match's account identifier (username/email) and opens fzf for fuzzy selection
 4. Fetches credentials fresh from pass-cli (never from cache)
 5. Copies username to clipboard (if available)
 6. Waits 0.5 seconds
