@@ -80,14 +80,9 @@ pub fn set_cached_vault(vault_name: &str, items: &ItemList) -> Result<()> {
 
     let timestamp = get_current_timestamp();
 
-    // Prepare items for caching: extract and store usernames
-    let mut items_to_cache = items.clone();
-    for item in &mut items_to_cache.items {
-        // Extract username from content and store in cached_username field
-        if item.cached_username.is_none() {
-            item.cached_username = item.content.get_username();
-        }
-    }
+    // Cache the item summaries as-is. They contain only titles and item types —
+    // never credentials — so this is safe to persist to disk.
+    let items_to_cache = items.clone();
 
     // Update or add this vault's cache
     let mut found = false;

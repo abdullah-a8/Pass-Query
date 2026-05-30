@@ -48,6 +48,51 @@ pub async fn list_vault_items(vault_name: &str) -> Result<ItemList> {
     Ok(item_list)
 }
 
+/// Fetch only the account identifier (username, falling back to email) for an item
+/// using `pass-cli item view --field`. This reads a single field and never retrieves
+/// the password, so it is safe to call for every match shown in the picker.
+/// Returns `None` if the item has neither a username nor an email (e.g. a note).
+pub async fn get_item_account(vault_name: &str, item_title: &str) -> Option<String> {
+    for field in ["username", "email"] {
+        if let Some(value) = view_single_field(vault_name, item_title, field).await {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Run `pass-cli item view ... --field <field>`, which prints the raw field value.
+/// Returns `None` on failure or when the field is absent/empty (pass-cli exits
+/// non-zero for a field that isn't set on the item).
+async fn view_single_field(vault_name: &str, item_title: &str, field: &str) -> Option<String> {
+    let output = Command::new("pass-cli")
+        .args([
+            "item",
+            "view",
+            "--vault-name",
+            vault_name,
+            "--item-title",
+            item_title,
+            "--field",
+            field,
+        ])
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let value = String::from_utf8(output.stdout).ok()?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 /// Get both username and password in ONE call using `pass-cli item view --output json`
 /// This replaces the old approach of making 2-3 separate --field calls
 pub async fn get_item_credentials(vault_name: &str, item_title: &str) -> Result<(Option<String>, String)> {

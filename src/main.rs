@@ -36,16 +36,26 @@ struct Cli {
     print: bool,
 }
 
+/// Copy text to the system clipboard using the platform's native tool:
+/// `pbcopy` on macOS, `wl-copy` (wl-clipboard) on Linux/Wayland.
 fn copy_to_clipboard(text: &str) -> Result<()> {
-    let mut child = Command::new("wl-copy")
+    #[cfg(target_os = "macos")]
+    let (tool, install_hint) = ("pbcopy", "pbcopy ships with macOS.");
+    #[cfg(not(target_os = "macos"))]
+    let (tool, install_hint) = ("wl-copy", "Install: sudo apt install wl-clipboard");
+
+    let mut child = Command::new(tool)
         .stdin(Stdio::piped())
         .spawn()
-        .context(format!("{} Failed to run wl-copy. Is wl-clipboard installed?\n  Install: sudo apt install wl-clipboard", "✗".red()))?;
-    
+        .context(format!(
+            "{} Failed to run {tool}. {install_hint}",
+            "✗".red()
+        ))?;
+
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(text.as_bytes())?;
     }
-    
+
     child.wait()?;
     Ok(())
 }
@@ -63,19 +73,22 @@ async fn main() -> Result<()> {
     let vault_list = pass_cli::fetch_vaults().await?;
 
     // Search with caching and limited concurrency (10 parallel max)
-    let matches = search::search_all_vaults_limited(vault_list.vaults, cli.query.clone()).await?;
+    let mut matches = search::search_all_vaults_limited(vault_list.vaults, cli.query.clone()).await?;
+
+    // When several items match, fetch each one's account identifier (username/email)
+    // so the picker can tell them apart. This reads only that field, never the password.
+    if matches.len() > 1 {
+        matches = search::enrich_with_accounts(matches).await;
+    }
 
     // Handle selection with fzf
     let selected = selection::select_item(matches)?;
 
-    // Get credentials - fetch fresh if not available (from cache)
-    let (username, password) = match (&selected.username, &selected.password) {
-        (Some(u), Some(p)) => (Some(u.clone()), p.clone()),
-        _ => {
-            // Fetch fresh using single pass-cli call
-            pass_cli::get_item_credentials(&selected.vault_name, &selected.title).await?
-        }
-    };
+    // Fetch credentials fresh via `item view`. The `item list` output is a
+    // secret-free summary (pass-cli 2.0.3+), so credentials are never cached
+    // and are only ever read for the single item the user selected.
+    let (username, password) =
+        pass_cli::get_item_credentials(&selected.vault_name, &selected.title).await?;
 
     if cli.print {
         // Print mode: output to stdout

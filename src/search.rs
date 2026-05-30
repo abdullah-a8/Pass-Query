@@ -25,19 +25,12 @@ async fn search_vault(vault: Vault, query: String) -> Result<Vec<Match>> {
     let matches: Vec<Match> = item_list
         .items
         .into_iter()
-        .filter(|item| item.content.title.to_lowercase().contains(&query_lower))
-        .map(|item| {
-            // Extract credentials from the item
-            // Use Item::get_username() which checks cached_username first
-            let username = item.get_username();
-            let password = item.content.get_password();
-            
-            Match {
-                title: item.content.title,
-                vault_name: vault.name.clone(),
-                username,
-                password,
-            }
+        .filter(|item| item.title.to_lowercase().contains(&query_lower))
+        .map(|item| Match {
+            title: item.title,
+            vault_name: vault.name.clone(),
+            item_type: item.item_type,
+            account: None,
         })
         .collect();
 
@@ -89,4 +82,20 @@ pub async fn search_all_vaults_limited(vaults: Vec<Vault>, query: String) -> Res
     }
 
     Ok(all_matches)
+}
+
+/// Populate each match's account identifier (username/email) in parallel so the
+/// picker can disambiguate same-titled items. Reads only the username/email field
+/// per item — never the password. Input order is preserved.
+pub async fn enrich_with_accounts(matches: Vec<Match>) -> Vec<Match> {
+    const MAX_CONCURRENT: usize = 10;
+
+    stream::iter(matches)
+        .map(|mut m| async move {
+            m.account = pass_cli::get_item_account(&m.vault_name, &m.title).await;
+            m
+        })
+        .buffered(MAX_CONCURRENT)
+        .collect::<Vec<_>>()
+        .await
 }

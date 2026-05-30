@@ -14,22 +14,20 @@ pub fn select_item(matches: Vec<Match>) -> Result<Match> {
         0 => anyhow::bail!("{} No items found matching query", "✗".red()),
         1 => Ok(matches.into_iter().next().unwrap()),
         _ => {
-            // Build fzf input: "index|[vault] title — username"
+            // Build fzf input: "index|[vault] title — account"
+            // The account identifier (username/email) is fetched per match for
+            // disambiguation; it falls back to the item type when unavailable.
             let fzf_input: String = matches
                 .iter()
                 .enumerate()
                 .map(|(i, m)| {
-                    let username_display = m.username
-                        .as_deref()
-                        .unwrap_or("(no username)");
-
                     format!(
                         "{}|{} {} {} {}",
                         i,
                         format!("[{}]", m.vault_name).dimmed(),
                         m.title,
                         "—".dimmed(),
-                        username_display
+                        m.picker_detail().dimmed()
                     )
                 })
                 .collect::<Vec<_>>()
