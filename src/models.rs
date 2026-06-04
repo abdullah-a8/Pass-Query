@@ -1,16 +1,18 @@
 use serde::{Deserialize, Serialize};
 
 /// Vault list response from `pass-cli vault list --output json`
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct VaultList {
     pub vaults: Vec<Vault>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Vault {
     pub name: String,
-    // pass-cli also emits `vault_id` and `share_id`; pq only addresses vaults by
-    // name, so those keys are intentionally ignored by serde.
+    // Stable vault/share metadata. This is safe to cache and lets pq address
+    // duplicate titles without storing account identifiers.
+    #[serde(default)]
+    pub share_id: Option<String>,
 }
 
 /// Item list response from `pass-cli item list <vault> --output json`.
@@ -27,6 +29,10 @@ pub struct ItemList {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Item {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub share_id: Option<String>,
     pub title: String,
     // Item kind reported by pass-cli ("login", "note", "alias", ...). Used only
     // for display in the picker. Defaulted so a future rename can never break search.
@@ -38,12 +44,15 @@ pub struct Item {
 /// carries no secrets, so it is always fetched fresh via `item view`.
 #[derive(Debug, Clone)]
 pub struct Match {
+    pub item_id: Option<String>,
+    pub share_id: Option<String>,
     pub title: String,
     pub vault_name: String,
     pub item_type: String,
-    /// Account identifier (username, or email as fallback) shown in the picker to
-    /// disambiguate same-titled items. Populated lazily via `item view --field`
-    /// only when there are multiple matches; never holds the password.
+    /// Picker detail shown to disambiguate same-titled items. Prefers an
+    /// in-memory username/email fetched via `item view --field`; falls back to a
+    /// short item-id label when Proton has no account field or the fetch fails.
+    /// Never holds the password and is never cached.
     pub account: Option<String>,
 }
 
@@ -159,6 +168,8 @@ mod tests {
         let list: ItemList =
             serde_json::from_str(ITEM_LIST_JSON).expect("should parse new item list summary");
         assert_eq!(list.items.len(), 2);
+        assert_eq!(list.items[0].id.as_deref(), Some("item-abc"));
+        assert_eq!(list.items[0].share_id.as_deref(), Some("share-xyz"));
         assert_eq!(list.items[0].title, "reddit");
         assert_eq!(list.items[0].item_type, "login");
         assert_eq!(list.items[1].title, "personal note");
@@ -171,6 +182,8 @@ mod tests {
         // only field search depends on, so a missing type must never break parsing.
         let json = r#"{ "items": [ { "title": "github" } ] }"#;
         let list: ItemList = serde_json::from_str(json).expect("should parse with only title");
+        assert!(list.items[0].id.is_none());
+        assert!(list.items[0].share_id.is_none());
         assert_eq!(list.items[0].title, "github");
         assert_eq!(list.items[0].item_type, "");
     }
@@ -242,13 +255,17 @@ mod tests {
 
     #[test]
     fn vault_list_parses() {
-        let json = r#"{ "vaults": [ { "name": "Personal", "vault_id": "v1", "share_id": "s1" } ] }"#;
+        let json =
+            r#"{ "vaults": [ { "name": "Personal", "vault_id": "v1", "share_id": "s1" } ] }"#;
         let vl: VaultList = serde_json::from_str(json).expect("should parse vault list");
         assert_eq!(vl.vaults[0].name, "Personal");
+        assert_eq!(vl.vaults[0].share_id.as_deref(), Some("s1"));
     }
 
     fn make_match(account: Option<&str>, item_type: &str) -> Match {
         Match {
+            item_id: Some("item-1".to_string()),
+            share_id: Some("share-1".to_string()),
             title: "reddit".to_string(),
             vault_name: "Personal".to_string(),
             item_type: item_type.to_string(),
