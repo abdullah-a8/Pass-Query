@@ -33,9 +33,17 @@ pub fn select_item(matches: Vec<Match>) -> Result<Match> {
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            // Run fzf
+            // fzf shows and searches only the fields --with-nth names. Field 1
+            // is the index; "2.." keeps a title that itself contains "|" whole.
+            // (fzf treats a one-character delimiter literally, not as a regex.)
             let mut fzf = Command::new("fzf")
-                .args(["--height=40%", "--reverse", "--delimiter=|", "--with-nth=2", "--ansi"])
+                .args([
+                    "--height=40%",
+                    "--reverse",
+                    "--delimiter=|",
+                    "--with-nth=2..",
+                    "--ansi",
+                ])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit())
