@@ -44,9 +44,10 @@ fn fzf_shows_every_field_after_the_index_so_titles_with_pipes_stay_whole() {
         Some("2.."),
         "{args}"
     );
+    // Escaped: fzf before 0.58 treats a bare "|" delimiter as a regex.
     assert_eq!(
         arg_value(&args, "--delimiter").as_deref(),
-        Some("|"),
+        Some("\\|"),
         "{args}"
     );
     let picker = h.fzf_input().unwrap();
