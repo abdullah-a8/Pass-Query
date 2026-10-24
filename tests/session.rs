@@ -306,3 +306,19 @@ fn a_forced_logout_is_reported_as_an_ended_session() {
         assert!(err.contains("pass-cli login"), "{stderr_text}: {err}");
     }
 }
+
+#[test]
+fn a_vault_name_in_an_error_cannot_send_terminal_escapes() {
+    let mut h = Harness::new();
+    h.vault("Shared \u{1b}]0;pwned\u{7}", "share-shared")
+        .vault("Personal", "share-personal")
+        .login("share-personal", GITHUB);
+    h.fail_vault("share-shared", "Error: Error listing items\n");
+
+    let out = h.run(&["github", "-p"]);
+
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("vault search failed"), "{err}");
+    assert!(!err.contains('\u{1b}'), "{err:?}");
+}

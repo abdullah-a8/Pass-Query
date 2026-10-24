@@ -176,12 +176,12 @@ pub async fn list_vault_items(vault: &Vault, login_only: bool) -> Result<ItemLis
         .await
         .context(format!(
             "Failed to execute pass-cli item list for vault '{}'",
-            vault.name
+            printable(&vault.name)
         ))?;
 
     if !output.status.success() {
         return Err(failure(
-            &format!("pass-cli item list for '{}'", vault.name),
+            &format!("pass-cli item list for '{}'", printable(&vault.name)),
             &output.stderr,
         ));
     }
@@ -191,7 +191,7 @@ pub async fn list_vault_items(vault: &Vault, login_only: bool) -> Result<ItemLis
 
     let item_list: ItemList = serde_json::from_str(&stdout).context(format!(
         "Failed to parse item list JSON for vault '{}'",
-        vault.name
+        printable(&vault.name)
     ))?;
 
     Ok(item_list)
@@ -267,7 +267,8 @@ pub async fn get_item_credentials(item: &Match) -> Result<(Option<String>, Strin
         .await
         .context(format!(
             "Failed to execute pass-cli item view for '{}' in vault '{}'",
-            item.title, item.vault_name
+            printable(&item.title),
+            printable(&item.vault_name)
         ))?;
 
     if !output.status.success() {
