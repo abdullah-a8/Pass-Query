@@ -105,22 +105,23 @@ fn a_second_search_is_served_from_the_cache() {
 }
 
 #[test]
-fn the_cache_holds_no_credentials_and_is_private() {
-    let h = personal_vault();
+fn the_cache_holds_only_search_metadata_and_is_private() {
+    let mut h = personal_vault();
+    // A second vault with a duplicate title, so the picker also fetched accounts.
+    h.vault("Work", "share-work").login(
+        "share-work",
+        Login {
+            id: "item-reddit-work",
+            password: "work\\secret\"quoted\u{e9}",
+            ..REDDIT
+        },
+    );
+    h.pick(1);
     assert!(h.run(&["reddit", "-p"]).status.success());
 
-    let cache = std::fs::read_to_string(h.cache_file()).expect("cache written");
+    let cache = h.cache_json(); // checks keys and every (unescaped) string
 
-    assert!(cache.contains("reddit"));
-    for secret in [
-        "reddit-secret",
-        "github-secret",
-        "redditor",
-        "octocat",
-        "me@example.com",
-    ] {
-        assert!(!cache.contains(secret), "cache leaks {secret}");
-    }
+    assert!(cache.to_string().contains("reddit"));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -130,6 +131,23 @@ fn the_cache_holds_no_credentials_and_is_private() {
             .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn an_existing_world_readable_cache_is_made_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let h = personal_vault();
+    h.write_cache("{}");
+    std::fs::set_permissions(h.cache_file(), std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    assert!(h.run(&["github", "-p"]).status.success());
+
+    let mode = std::fs::metadata(h.cache_file())
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
 }
 
 #[test]
@@ -215,22 +233,29 @@ fn duplicate_titles_show_each_account_in_the_picker() {
         stdout(&out),
         "Username: work@example.com\nPassword: work-secret\n"
     );
-    // Only single fields are read for the picker; the password is never in a field call.
-    for call in h.calls_to("item view") {
-        if has_arg(&call, "--field") {
-            assert!(!has_arg(&call, "password"));
-        }
+    // The picker reads only the username or email of each duplicate; the
+    // full item, with its password, is read once and only for the choice.
+    let views = h.calls_to("item view");
+    let (field_reads, full_reads): (Vec<_>, Vec<_>) =
+        views.iter().partition(|call| has_arg(call, "--field"));
+    for call in &field_reads {
+        assert!(
+            has_arg(call, "username") || has_arg(call, "email"),
+            "{call:?}"
+        );
     }
+    assert_eq!(full_reads.len(), 1, "{views:?}");
+    assert!(has_arg(full_reads[0], "--item-id=item-reddit-work"));
 }
 
 #[test]
-fn a_cancelled_picker_copies_nothing() {
+fn a_cancelled_picker_reads_no_credentials_and_copies_nothing() {
     let mut h = personal_vault();
-    h.login(
-        "share-personal",
+    // Duplicate titles, so the picker fetched account labels first.
+    h.vault("Work", "share-work").login(
+        "share-work",
         Login {
-            id: "item-reddit-2",
-            title: "reddit 2",
+            id: "item-reddit-work",
             ..REDDIT
         },
     );
@@ -240,10 +265,11 @@ fn a_cancelled_picker_copies_nothing() {
 
     assert!(!out.status.success());
     assert!(stderr(&out).contains("Selection cancelled"));
+    let views = h.calls_to("item view");
+    assert!(!views.is_empty(), "accounts were fetched for the picker");
     assert!(
-        h.calls_to("item view")
-            .iter()
-            .all(|c| has_arg(c, "--field"))
+        views.iter().all(|call| has_arg(call, "--field")),
+        "{views:?}"
     );
     assert!(h.copies().is_empty());
 }
@@ -258,12 +284,7 @@ fn clipboard_mode_copies_username_then_password_through_stdin() {
     let copies = h.copies();
     let texts: Vec<&str> = copies.iter().map(|(text, _)| text.as_str()).collect();
     assert_eq!(texts, ["octocat", "github-secret"]);
-    for (_, args) in &copies {
-        assert!(
-            !args.contains("github-secret"),
-            "secret passed as an argument"
-        );
-    }
+    // Harness::run also checks that no secret reached stderr or any argv.
     assert!(
         stdout(&out).is_empty(),
         "nothing is printed in clipboard mode"

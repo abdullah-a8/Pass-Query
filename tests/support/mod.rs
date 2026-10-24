@@ -129,10 +129,17 @@ impl Harness {
         fs::remove_file(self.bin_dir().join(name)).unwrap();
     }
 
-    /// Run pq with `args` and return its output.
+    /// Run pq with `args` and return its output. Every run is checked for
+    /// leaks: no username, email or password may appear on stderr or in the
+    /// arguments of any process pq started (pass-cli, fzf, clipboard).
     pub fn run(&self, args: &[&str]) -> Output {
         self.write_scenario();
-        Command::new(env!("CARGO_BIN_EXE_pq"))
+        // A permissive umask, so the cache's 0600 mode is pq's doing and not
+        // inherited from the developer's shell.
+        let output = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(r#"umask 022 && exec "$0" "$@""#)
+            .arg(env!("CARGO_BIN_EXE_pq"))
             .args(args)
             .env_clear()
             .env("PATH", self.path_var())
@@ -142,7 +149,41 @@ impl Harness {
             .env("NO_COLOR", "1")
             .stdin(Stdio::null())
             .output()
-            .expect("run pq")
+            .expect("run pq");
+        self.assert_no_leaks(&output);
+        output
+    }
+
+    /// Every username, email and password in the scenario.
+    pub fn secrets(&self) -> Vec<&'static str> {
+        self.items
+            .iter()
+            .filter_map(|item| match &item.content {
+                Content::Login(login) => Some([login.username, login.email, login.password]),
+                Content::Note => None,
+            })
+            .flatten()
+            .filter(|secret| !secret.is_empty())
+            .collect()
+    }
+
+    fn assert_no_leaks(&self, output: &Output) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut argv: Vec<String> = self.calls().into_iter().flatten().collect();
+        argv.extend(self.fzf_args());
+        argv.extend(self.copies().into_iter().map(|(_, args)| args));
+        for secret in self.secrets() {
+            assert!(
+                !stderr.contains(secret),
+                "stderr leaks {secret:?}:\n{stderr}"
+            );
+            for arg in &argv {
+                assert!(
+                    !arg.contains(secret),
+                    "{secret:?} passed as an argument: {arg}"
+                );
+            }
+        }
     }
 
     /// Every pass-cli invocation so far, as argument lists.
@@ -182,8 +223,50 @@ impl Harness {
             .collect()
     }
 
+    /// The arguments fzf was started with, tab-separated.
+    pub fn fzf_args(&self) -> Option<String> {
+        fs::read_to_string(self.fake_dir().join("fzf-args")).ok()
+    }
+
     pub fn fzf_input(&self) -> Option<String> {
         fs::read_to_string(self.fake_dir().join("fzf-input")).ok()
+    }
+
+    /// The cache file, parsed, after checking that it holds only searchable
+    /// metadata: its keys must be the known ones and no string in it (after
+    /// JSON unescaping) may contain a username, email or password.
+    pub fn cache_json(&self) -> Value {
+        let text = fs::read_to_string(self.cache_file()).expect("cache written");
+        let cache: Value = serde_json::from_str(&text).expect("cache is JSON");
+        assert_only_keys(&cache, &["vault_list", "vaults"]);
+        if let Some(list) = cache.get("vault_list").filter(|v| !v.is_null()) {
+            assert_only_keys(list, &["vaults", "timestamp"]);
+            assert_only_keys(&list["vaults"], &["vaults"]);
+            for vault in list["vaults"]["vaults"].as_array().unwrap() {
+                assert_only_keys(vault, &["name", "share_id"]);
+            }
+        }
+        for vault in cache["vaults"].as_array().unwrap() {
+            assert_only_keys(vault, &["vault_name", "login_only", "items", "timestamp"]);
+            assert_only_keys(&vault["items"], &["items"]);
+            for item in vault["items"]["items"].as_array().unwrap() {
+                assert_only_keys(item, &["id", "share_id", "title", "item_type"]);
+            }
+        }
+        let mut strings = Vec::new();
+        collect_strings(&cache, &mut strings);
+        for secret in self.secrets() {
+            for s in &strings {
+                assert!(!s.contains(secret), "cache leaks {secret:?} in {s:?}");
+            }
+        }
+        cache
+    }
+
+    pub fn write_cache(&self, contents: &str) {
+        let path = self.cache_file();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
     }
 
     pub fn cache_file(&self) -> PathBuf {
@@ -358,6 +441,30 @@ fn view(item: &Item) -> Value {
         },
         "attachments": [],
     })
+}
+
+fn assert_only_keys(value: &Value, allowed: &[&str]) {
+    let object = value
+        .as_object()
+        .unwrap_or_else(|| panic!("not an object: {value}"));
+    for key in object.keys() {
+        assert!(
+            allowed.contains(&key.as_str()),
+            "unexpected cache key {key:?} in {value}"
+        );
+    }
+}
+
+fn collect_strings(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(s) => out.push(s.clone()),
+        Value::Array(items) => items.iter().for_each(|v| collect_strings(v, out)),
+        Value::Object(map) => map.iter().for_each(|(k, v)| {
+            out.push(k.clone());
+            collect_strings(v, out);
+        }),
+        _ => {}
+    }
 }
 
 fn write_json(path: &Path, value: &Value) {
