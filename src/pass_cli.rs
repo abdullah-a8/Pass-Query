@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use std::fmt;
 use tokio::process::Command;
@@ -299,22 +299,26 @@ pub async fn get_item_account(item: &Match) -> Result<Option<String>> {
     Ok(None)
 }
 
-fn item_view_args(item: &Match) -> Vec<String> {
-    let mut args = vec!["item".to_string(), "view".to_string()];
-
-    if let Some(share_id) = item.share_id.as_deref() {
-        args.push(format!("--share-id={share_id}"));
-    } else {
-        args.push(format!("--vault-name={}", item.vault_name));
-    }
-
-    if let Some(item_id) = item.item_id.as_deref() {
-        args.push(format!("--item-id={item_id}"));
-    } else {
-        args.push(format!("--item-title={}", item.title));
-    }
-
-    args
+/// The `item view` arguments naming the picked item by its share and item
+/// IDs. Never by vault name and title: a title can match another item, whose
+/// credentials pq would then copy.
+fn item_view_args(item: &Match) -> Result<Vec<String>> {
+    let (Some(share_id), Some(item_id)) = (item.share_id.as_deref(), item.item_id.as_deref())
+    else {
+        bail!(
+            "{} pass-cli listed '{}' without its IDs, so pq cannot fetch it safely. \
+             Update pass-cli, then run pq with {}.",
+            "✗".red(),
+            printable(&item.title),
+            "-r".bold()
+        );
+    };
+    Ok(vec![
+        "item".to_string(),
+        "view".to_string(),
+        format!("--share-id={share_id}"),
+        format!("--item-id={item_id}"),
+    ])
 }
 
 /// Run `pass-cli item view ... --field <field>`, which prints the raw field value.
@@ -322,7 +326,7 @@ fn item_view_args(item: &Match) -> Vec<String> {
 /// that isn't set) or the read fails for another reason: the picker then falls
 /// back to another label. A session problem is returned as the error.
 async fn view_single_field(item: &Match, field: &str) -> Result<Option<String>> {
-    let mut args = item_view_args(item);
+    let mut args = item_view_args(item)?;
     args.extend(["--field".to_string(), field.to_string()]);
 
     let output = pass_cli_command()
@@ -346,7 +350,7 @@ async fn view_single_field(item: &Match, field: &str) -> Result<Option<String>> 
 /// Get both username and password in ONE call using `pass-cli item view --output json`
 /// This replaces the old approach of making 2-3 separate --field calls
 pub async fn get_item_credentials(item: &Match) -> Result<(Option<String>, String)> {
-    let mut args = item_view_args(item);
+    let mut args = item_view_args(item)?;
     args.extend(["--output".to_string(), "json".to_string()]);
 
     let output = pass_cli_command()
@@ -527,15 +531,21 @@ mod tests {
 
     #[test]
     fn item_view_args_pass_ids_as_single_equals_args() {
-        let args = item_view_args(&item_ref(Some("-item-id"), Some("-share-id")));
+        let args = item_view_args(&item_ref(Some("-item-id"), Some("-share-id"))).unwrap();
         assert!(args.contains(&"--share-id=-share-id".to_string()));
         assert!(args.contains(&"--item-id=-item-id".to_string()));
     }
 
     #[test]
-    fn item_view_args_falls_back_to_title_without_positional_parsing() {
-        let args = item_view_args(&item_ref(None, None));
-        assert!(args.contains(&"--vault-name=Personal".to_string()));
-        assert!(args.contains(&"--item-title=reddit".to_string()));
+    fn an_item_without_ids_is_never_looked_up_by_title() {
+        // A title can match another item; only IDs name the picked one.
+        for item in [
+            item_ref(None, None),
+            item_ref(Some("item-1"), None),
+            item_ref(None, Some("share-1")),
+        ] {
+            let err = item_view_args(&item).unwrap_err().to_string();
+            assert!(err.contains("'reddit'"), "{err}");
+        }
     }
 }
