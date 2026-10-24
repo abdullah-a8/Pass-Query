@@ -40,6 +40,7 @@ gh attestation verify pq-v0.5.0-x86_64-unknown-linux-musl.tar.gz \
     --signer-workflow abdullah-a8/Pass-Query/.github/workflows/release.yml \
     --source-ref refs/tags/v0.5.0 &&
 tar -xzf pq-v0.5.0-x86_64-unknown-linux-musl.tar.gz &&
+mkdir -p ~/.local/bin &&
 install pq-v0.5.0-x86_64-unknown-linux-musl/pq ~/.local/bin/
 ```
 
@@ -88,7 +89,7 @@ Clearing is done by a small background helper that pq starts just before copying
 - pq reads credentials only through pass-cli and never stores them: the cache holds titles, item types and IDs, and vault names.
 - The cache file is private to you (0600, in a 0700 directory). pq ignores a cache that is a link or that anyone else could have written, and fetches fresh data instead.
 - Credentials reach the clipboard tool through its standard input, never as a command-line argument.
-- pq disables core dumps and, on Linux, makes itself non-dumpable, so its memory cannot end up in a crash dump or be read by your other processes. pass-cli, fzf and the clipboard tools are separate programs and protect their own memory.
+- At startup pq disables core dumps and, on Linux, makes itself non-dumpable, so its memory does not end up in a crash dump or get read by your other processes. This is best effort: if the system refuses, for example in a restrictive sandbox, pq runs without it. pass-cli, fzf and the clipboard tools are separate programs and protect their own memory.
 - On Proton Business plans, pass-cli reports item reads to your organisation. Labelling matches that share a title reads each one's username, so it is recorded as a read of each of those items.
 
 ## Cache Location
