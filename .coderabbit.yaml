@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
+language: en-US
+reviews:
+  profile: assertive
+  auto_review:
+    enabled: true
+    # Review PRs targeting any base branch, not just the default branch,
+    # so stacked PRs are reviewed too.
+    base_branches:
+      - ".*"
+  path_instructions:
+    - path: "src/**/*.rs"
+      instructions: >-
+        pq handles Proton Pass credentials. Flag any path where a password,
+        username, email or other item secret could be written to the cache,
+        logged, printed in an error or Debug output, or passed on a process
+        command line. The on-disk cache may hold only titles, item and share
+        IDs, item types and vault names. pq talks to Proton only through the
+        official pass-cli subprocess and its JSON output; check new pass-cli
+        flags and JSON fields against pass-cli's documented behaviour.
+    - path: ".github/workflows/**"
+      instructions: >-
+        Actions must be pinned to full commit SHAs with the version in a
+        comment, use least-privilege permissions, and not persist checkout
+        credentials.
