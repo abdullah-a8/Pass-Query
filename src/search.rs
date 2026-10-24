@@ -88,6 +88,9 @@ pub async fn search_all_vaults_limited(
 ) -> Result<Vec<Match>> {
     const MAX_CONCURRENT: usize = 10; // Increased from 4 to 10 for faster first run
 
+    if vaults.is_empty() {
+        anyhow::bail!("{} No vaults found in your Proton Pass account.", "✗".red());
+    }
     let vault_count = vaults.len() as u64;
 
     // Create progress bar

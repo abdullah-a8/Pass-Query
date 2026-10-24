@@ -347,3 +347,15 @@ fn a_trashed_item_title_in_an_error_cannot_send_terminal_escapes() {
         "{err:?}"
     );
 }
+
+#[test]
+fn an_account_without_vaults_says_so() {
+    let h = Harness::new(); // no vaults at all
+
+    let out = h.run(&["github", "-p"]);
+
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("No vaults found"), "{err}");
+    assert!(!err.contains("No items found"), "{err}");
+}
