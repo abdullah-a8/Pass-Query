@@ -121,7 +121,12 @@ async fn load_vaults(use_cache: bool) -> Result<(VaultList, bool)> {
     if use_cache && let Some(cached) = cache::get_cached_vault_list() {
         return Ok((cached, true));
     }
-    let vaults = pass_cli::fetch_vaults().await?;
+    // The version check runs alongside the fetch, so it adds no wait.
+    let (warning, vaults) = tokio::join!(pass_cli::version_warning(), pass_cli::fetch_vaults());
+    if let Some(warning) = warning {
+        eprintln!("{warning}");
+    }
+    let vaults = vaults?;
     // The cache only saves time; failing to write it must not stop the search.
     let _ = cache::set_cached_vault_list(&vaults);
     Ok((vaults, false))

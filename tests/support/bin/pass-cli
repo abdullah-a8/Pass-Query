@@ -39,6 +39,10 @@ unsupported() {
 }
 
 case "$command" in
+--version-)
+    # pass-cli prints "<name> <version> (<git hash>)".
+    printf 'Proton Pass CLI %s (0a1b2c3)\n' "$(cat "$dir/version" 2>/dev/null || echo 2.5.1)"
+    ;;
 vault-list)
     shift 2
     [ "$*" = "--output json" ] || unsupported "vault list $*"

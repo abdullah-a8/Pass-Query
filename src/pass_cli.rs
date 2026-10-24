@@ -173,6 +173,41 @@ fn summarize(stderr: &str) -> String {
     printable(&summary).chars().take(MAX_CHARS).collect()
 }
 
+/// The oldest pass-cli whose `item list` JSON is the secret-free summary pq
+/// parses (title and item_type at the top level).
+const MIN_VERSION: (u32, u32, u32) = (2, 0, 3);
+
+/// A warning when the installed pass-cli is older than pq supports. Best
+/// effort: no warning when pass-cli is missing or its version is unreadable.
+pub async fn version_warning() -> Option<String> {
+    let output = pass_cli_command().arg("--version").output().await.ok()?;
+    let version = parse_version(&String::from_utf8_lossy(&output.stdout))?;
+    (version < MIN_VERSION).then(|| {
+        let show = |(major, minor, patch): (u32, u32, u32)| format!("{major}.{minor}.{patch}");
+        format!(
+            "{} pass-cli {} is older than {}, the oldest version pq supports; searches may fail. \
+             Update it: https://protonpass.github.io/pass-cli/",
+            "⚠".yellow(),
+            show(version),
+            show(MIN_VERSION)
+        )
+    })
+}
+
+/// The first `major.minor.patch` word in `pass-cli --version` output
+/// ("Proton Pass CLI 2.5.1 (0a1b2c3)").
+fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
+    text.split_whitespace().find_map(|word| {
+        let mut parts = word.split('.');
+        let version = (
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+        );
+        parts.next().is_none().then_some(version)
+    })
+}
+
 /// Fetch all vaults using `pass-cli vault list --output json`
 pub async fn fetch_vaults() -> Result<VaultList> {
     let output = pass_cli_command()
@@ -475,6 +510,19 @@ mod tests {
         );
         assert_eq!(summarize("Error: a\u{1b}[2Kb"), "a\\u{1b}[2Kb");
         assert_eq!(summarize(&format!("Error: {}", "x".repeat(500))).len(), 200);
+    }
+
+    #[test]
+    fn parses_the_version_from_pass_cli_version_output() {
+        assert_eq!(
+            parse_version("Proton Pass CLI 2.5.1 (0a1b2c3)\n"),
+            Some((2, 5, 1))
+        );
+        assert_eq!(parse_version("Proton Pass CLI 2.10.0"), Some((2, 10, 0)));
+        assert_eq!(parse_version("Proton Pass CLI nightly"), None);
+        assert_eq!(parse_version("Proton Pass CLI 2.5.1-beta"), None);
+        assert_eq!(parse_version("Proton Pass CLI 2.5"), None);
+        assert!((2, 0, 2) < MIN_VERSION && (2, 10, 0) > MIN_VERSION);
     }
 
     #[test]

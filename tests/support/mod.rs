@@ -185,6 +185,11 @@ impl Harness {
         fs::write(dir.join(format!("item-view.{item_id}")), stderr).unwrap();
     }
 
+    /// Make the fake report `version` from `pass-cli --version` (default 2.5.1).
+    pub fn pass_cli_version(&self, version: &str) {
+        fs::write(self.fake_dir().join("version"), version).unwrap();
+    }
+
     /// Choose the 1-based picker line fzf returns.
     pub fn pick(&self, line: usize) {
         fs::write(self.fake_dir().join("fzf-pick"), line.to_string()).unwrap();
