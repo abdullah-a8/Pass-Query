@@ -122,6 +122,12 @@ impl Harness {
         self
     }
 
+    /// Delete an item from Proton Pass (it disappears from every listing).
+    pub fn remove(&mut self, id: &str) -> &mut Self {
+        self.items.retain(|item| item.id != id);
+        self
+    }
+
     /// Move an item to the trash. pass-cli keeps listing it, with state "Trashed".
     pub fn trash(&mut self, id: &str) -> &mut Self {
         let item = self.items.iter_mut().find(|item| item.id == id);

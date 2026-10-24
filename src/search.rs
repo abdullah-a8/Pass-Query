@@ -42,22 +42,52 @@ fn title_key(title: &str) -> String {
     title.trim().to_lowercase()
 }
 
-/// Search a single vault for items matching the query (case-insensitive)
-/// Uses caching to speed up repeated searches
-async fn search_vault(vault: Vault, query: String, login_only: bool) -> Result<Vec<Match>> {
-    // Try to get from cache first
+/// Which cached item lists a search may use.
+pub enum CacheUse {
+    /// Any list cached within the last day.
+    Any,
+    /// Only the lists of these vaults (those fetched earlier in this run).
+    OnlyVaults(HashSet<String>),
+    /// None: fetch every list from pass-cli.
+    Never,
+}
+
+/// The matches of one search, whether any of them came from the cache (and
+/// so may be out of date), and the vaults whose lists were fetched fresh.
+pub struct SearchResults {
+    pub matches: Vec<Match>,
+    pub from_cache: bool,
+    pub fetched_vaults: HashSet<String>,
+}
+
+/// Search one vault's titles for `query` (case-insensitive), from its cached
+/// item list when `cache_use` allows, otherwise from pass-cli (and cache what
+/// was fetched). Returns the matches and whether they came from the cache.
+async fn search_vault(
+    vault: Vault,
+    query: String,
+    login_only: bool,
+    cache_use: &CacheUse,
+) -> Result<(Vec<Match>, bool)> {
     // Cached lists were filtered when written; filtering again keeps a cache
     // edited by hand or by another tool from offering trashed items.
-    let item_list = if let Some(cached) = cache::get_cached_vault(&vault.name, login_only) {
-        cached.into_active()
-    } else {
-        // Not in cache, fetch from pass-cli
-        let items = pass_cli::list_vault_items(&vault, login_only)
-            .await?
-            .into_active();
-        // Store in cache for future use
-        let _ = cache::set_cached_vault(&vault.name, login_only, &items);
-        items
+    let cached = match cache_use {
+        CacheUse::Any => cache::get_cached_vault(&vault.name, login_only),
+        CacheUse::OnlyVaults(names) if names.contains(&vault.name) => {
+            cache::get_cached_vault(&vault.name, login_only)
+        }
+        _ => None,
+    };
+    let from_cache = cached.is_some();
+    let item_list = match cached {
+        Some(items) => items.into_active(),
+        None => {
+            let items = pass_cli::list_vault_items(&vault, login_only)
+                .await?
+                .into_active();
+            let _ = cache::set_cached_vault(&vault.name, login_only, &items);
+            items
+        }
     };
 
     let query_lower = query.to_lowercase();
@@ -75,17 +105,18 @@ async fn search_vault(vault: Vault, query: String, login_only: bool) -> Result<V
         })
         .collect();
 
-    Ok(matches)
+    Ok((matches, from_cache))
 }
 
-/// Search all vaults with LIMITED concurrency and caching for best performance
-/// First run: ~8-10 seconds (with 10 concurrent pass-cli processes)
-/// Subsequent runs: <1 second (from cache, valid for 5 minutes)
+/// Search every vault, at most 10 at a time. A fetch from pass-cli takes
+/// seconds per vault; a vault `cache_use` lets the search read from the cache
+/// is searched instantly instead.
 pub async fn search_all_vaults_limited(
     vaults: Vec<Vault>,
     query: String,
     login_only: bool,
-) -> Result<Vec<Match>> {
+    cache_use: CacheUse,
+) -> Result<SearchResults> {
     const MAX_CONCURRENT: usize = 10; // Increased from 4 to 10 for faster first run
 
     if vaults.is_empty() {
@@ -107,19 +138,29 @@ pub async fn search_all_vaults_limited(
         .map(|vault| {
             let query = query.clone();
             let pb = pb.clone();
+            let cache_use = &cache_use;
             async move {
-                let result = search_vault(vault, query, login_only).await;
+                let name = vault.name.clone();
+                let result = search_vault(vault, query, login_only, cache_use).await;
                 pb.inc(1);
-                result
+                (name, result)
             }
         })
         .buffer_unordered(MAX_CONCURRENT);
 
     let mut all_matches = Vec::new();
+    let mut from_cache = false;
+    let mut fetched_vaults = HashSet::new();
     let mut failures = Vec::new();
-    while let Some(result) = searches.next().await {
+    while let Some((name, result)) = searches.next().await {
         match result {
-            Ok(matches) => all_matches.extend(matches),
+            Ok((matches, cached)) => {
+                all_matches.extend(matches);
+                from_cache |= cached;
+                if !cached {
+                    fetched_vaults.insert(name);
+                }
+            }
             // A session problem affects every vault: report it at once, with
             // its fix. Dropping `searches` cancels (and kills) the others.
             Err(e) => {
@@ -152,7 +193,11 @@ pub async fn search_all_vaults_limited(
     // Deterministic order so the picker is stable across runs.
     sort_matches(&mut all_matches);
 
-    Ok(all_matches)
+    Ok(SearchResults {
+        matches: all_matches,
+        from_cache,
+        fetched_vaults,
+    })
 }
 
 fn duplicate_title_keys(matches: &[Match]) -> HashSet<String> {

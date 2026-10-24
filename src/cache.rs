@@ -10,7 +10,10 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use crate::models::{Item, ItemList, Vault, VaultList};
 
-const CACHE_TTL_SECONDS: u64 = 300; // 5 minutes
+/// Cached metadata older than this is fetched again. Items added or changed
+/// within the day are still found: a search with no cached match, or a
+/// cached item that has gone, triggers one fresh search (see `lookup`).
+const MAX_AGE_SECONDS: u64 = 24 * 60 * 60;
 
 /// Bumped whenever cached contents change meaning, so caches written by an
 /// older pq are discarded instead of misread. 2: item lists exclude trashed
@@ -78,12 +81,9 @@ fn get_current_timestamp() -> u64 {
         .as_secs()
 }
 
-fn cache_entry_is_usable(timestamp: u64) -> bool {
-    let strict_ttl = std::env::var("PQ_STRICT_CACHE_TTL")
-        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-
-    !strict_ttl || get_current_timestamp() - timestamp < CACHE_TTL_SECONDS
+fn is_fresh(timestamp: u64) -> bool {
+    // A timestamp in the future (clock moved back) counts as age zero.
+    get_current_timestamp().saturating_sub(timestamp) < MAX_AGE_SECONDS
 }
 
 fn cache_safe_item_list(items: &ItemList) -> ItemList {
@@ -137,6 +137,7 @@ fn write_cache_file(cache_path: &PathBuf, cache_json: &str) -> Result<()> {
     Ok(())
 }
 
+/// A vault's cached item list, if one was written within the last day.
 pub fn get_cached_vault(vault_name: &str, login_only: bool) -> Option<ItemList> {
     let cache_path = get_cache_path().ok()?;
     if !cache_path.exists() {
@@ -153,10 +154,7 @@ pub fn get_cached_vault(vault_name: &str, login_only: bool) -> Option<ItemList> 
             if !(exact_scope || broader_all_scope) {
                 continue;
             }
-            // By default, stale metadata is still usable: it contains no secrets
-            // and avoids a slow network refresh. Set PQ_STRICT_CACHE_TTL=1 to
-            // restore the 5-minute freshness window.
-            if cache_entry_is_usable(cached_vault.timestamp) {
+            if is_fresh(cached_vault.timestamp) {
                 return Some(cached_vault.items);
             }
         }
@@ -224,7 +222,7 @@ pub fn get_cached_vault_list() -> Option<VaultList> {
     let cache = parse_cache(&cache_data)?;
     let cached = cache.vault_list?;
 
-    if cache_entry_is_usable(cached.timestamp) {
+    if is_fresh(cached.timestamp) {
         Some(cached.vaults)
     } else {
         None
@@ -253,14 +251,6 @@ pub fn set_cached_vault_list(vaults: &VaultList) -> Result<()> {
     let cache_json = serde_json::to_string(&cache)?;
     write_cache_file(&cache_path, &cache_json)?;
 
-    Ok(())
-}
-
-pub fn clear_cache() -> Result<()> {
-    let cache_path = get_cache_path()?;
-    if cache_path.exists() {
-        fs::remove_file(&cache_path).context("Failed to remove cache file")?;
-    }
     Ok(())
 }
 
