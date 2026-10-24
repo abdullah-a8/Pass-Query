@@ -195,6 +195,11 @@ impl Harness {
         fs::write(self.fake_dir().join("fzf-reply"), reply).unwrap();
     }
 
+    /// The picks for successive fzf invocations: line numbers or "cancel".
+    pub fn pick_sequence(&self, picks: &[&str]) {
+        fs::write(self.fake_dir().join("fzf-picks"), picks.join("\n") + "\n").unwrap();
+    }
+
     pub fn cancel_picker(&self) {
         fs::write(self.fake_dir().join("fzf-pick"), "cancel").unwrap();
     }
@@ -328,6 +333,13 @@ impl Harness {
                 Some((text, args))
             })
             .collect()
+    }
+
+    /// How many times fzf was started.
+    pub fn fzf_invocations(&self) -> usize {
+        fs::read_to_string(self.fake_dir().join("fzf-args"))
+            .map(|log| log.lines().count())
+            .unwrap_or(0)
     }
 
     /// The arguments of the last fzf invocation, tab-separated.

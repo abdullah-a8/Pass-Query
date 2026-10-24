@@ -8,12 +8,13 @@ use crate::text::printable;
 
 /// Select an item from search results using fzf for fuzzy selection
 /// - 0 matches: return error
-/// - 1 match: auto-select
+/// - 1 match: auto-select, unless `always_ask` (the user's earlier pick
+///   failed, so another item must not be used without asking)
 /// - 2+ matches: use fzf to select
-pub fn select_item(matches: Vec<Match>) -> Result<Match> {
+pub fn select_item(matches: Vec<Match>, always_ask: bool) -> Result<Match> {
     match matches.len() {
         0 => anyhow::bail!("{} No items found matching query", "✗".red()),
-        1 => Ok(matches.into_iter().next().unwrap()),
+        1 if !always_ask => Ok(matches.into_iter().next().unwrap()),
         _ => {
             // Build fzf input: "index|[vault] title — account"
             // The account identifier (username/email) is fetched per match for

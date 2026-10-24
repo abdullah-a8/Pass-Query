@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use colored::Colorize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::cache;
 use crate::models::VaultList;
@@ -28,6 +28,11 @@ pub async fn find_credentials(query: &str, login_only: bool, refresh: bool) -> R
     // vault list again and reuses only item lists fetched during this run.
     let mut pass = if refresh { Pass::Fresh } else { Pass::Cached };
     let mut fetched_this_run = HashSet::new();
+    // Picker labels already read in this run, by share and item ID, so the
+    // retry does not read the same accounts again (on Business plans every
+    // read is reported to the organisation).
+    let mut known_accounts: HashMap<(Option<String>, Option<String>), String> = HashMap::new();
+    let mut pick_failed = false;
     loop {
         let (vaults, vaults_cached) = load_vaults(pass == Pass::Cached).await?;
         // A cached list with no vaults may be stale; only a fresh one is final.
@@ -63,9 +68,19 @@ pub async fn find_credentials(query: &str, login_only: bool, refresh: bool) -> R
         // picker. They are kept in memory and never cached.
         let mut matches = results.matches;
         if matches.len() > 1 {
+            for m in &mut matches {
+                m.account = known_accounts.get(&account_key(m)).cloned();
+            }
             matches = search::enrich_duplicate_titles_with_accounts(matches).await?;
+            for m in &matches {
+                if let Some(account) = &m.account {
+                    known_accounts.insert(account_key(m), account.clone());
+                }
+            }
         }
-        let selected = selection::select_item(matches)?;
+        // After the user's pick failed, another item is never used without
+        // asking, even when it is the only match left.
+        let selected = selection::select_item(matches, pick_failed)?;
 
         match pass_cli::get_item_credentials(&selected).await {
             Ok((username, password)) => return Ok(Credentials { username, password }),
@@ -78,10 +93,15 @@ pub async fn find_credentials(query: &str, login_only: bool, refresh: bool) -> R
                     printable(&selected.title)
                 );
                 pass = Pass::Retry;
+                pick_failed = true;
             }
             Err(e) => return Err(e),
         }
     }
+}
+
+fn account_key(m: &crate::models::Match) -> (Option<String>, Option<String>) {
+    (m.share_id.clone(), m.item_id.clone())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

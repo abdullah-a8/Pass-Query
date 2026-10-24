@@ -86,14 +86,19 @@ fn a_cache_older_than_a_day_is_refetched() {
 }
 
 #[test]
-fn a_cache_timestamp_in_the_future_does_not_crash() {
-    let h = personal_vault();
-    let future = cache_of_github(0).replace(&now().to_string(), &(now() + 10 * HOUR).to_string());
-    h.write_cache(&future);
+fn a_cache_timestamp_in_the_future_is_not_trusted() {
+    for future in [now() + 10 * HOUR, u64::MAX] {
+        let h = personal_vault();
+        h.write_cache(&cache_of_github(0).replace(&now().to_string(), &future.to_string()));
 
-    let out = h.run(&["github", "-p"]);
+        let out = h.run(&["github", "-p"]);
 
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
+        // A future timestamp (a clock moved back, or an edited cache) would
+        // otherwise never expire: it is treated as stale and refetched.
+        assert!(out.status.success(), "stderr: {}", stderr(&out));
+        assert_eq!(h.calls_to("vault list").len(), 1, "{future}");
+        assert_eq!(h.calls_to("item list").len(), 1, "{future}");
+    }
 }
 
 #[test]
@@ -271,4 +276,142 @@ fn a_vault_renamed_since_caching_never_lends_its_items_to_a_new_vault_of_that_na
             .any(|call| has_arg(call, "--share-id=share-new")),
         "the new vault was never listed: {lists:?}"
     );
+}
+
+const BANK_PERSONAL: Login = Login {
+    id: "item-bank-personal",
+    title: "bank personal",
+    username: "me",
+    email: "",
+    password: "personal-secret",
+};
+
+const BANK_WORK: Login = Login {
+    id: "item-bank-work",
+    title: "bank work",
+    username: "worker",
+    email: "",
+    password: "work-secret",
+};
+
+#[test]
+fn after_the_picked_item_fails_the_retry_asks_again_even_for_one_match() {
+    let mut h = Harness::new();
+    h.vault("Personal", "share-personal")
+        .login("share-personal", BANK_PERSONAL)
+        .login("share-personal", BANK_WORK);
+    h.pick(1);
+    assert!(h.run(&["bank", "-p"]).status.success()); // caches both
+    h.remove("item-bank-personal");
+    h.clear_calls();
+    // Line 1 of the first picker is "bank personal", now deleted; line 1 of
+    // the retry's picker is "bank work".
+    h.pick(1);
+
+    let out = h.run(&["bank", "-p"]);
+
+    // The retry found only "bank work": it is shown in a picker, not copied
+    // without asking.
+    assert_eq!(h.fzf_invocations(), 2, "no picker on the retry");
+    let picker = h.fzf_input().unwrap();
+    assert!(picker.contains("bank work"), "{picker}");
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "Username: worker\nPassword: work-secret\n");
+}
+
+#[test]
+fn a_cancelled_retry_picker_copies_nothing() {
+    let mut h = Harness::new();
+    h.vault("Personal", "share-personal")
+        .login("share-personal", BANK_PERSONAL)
+        .login("share-personal", BANK_WORK);
+    h.pick(1);
+    assert!(h.run(&["bank", "-p"]).status.success());
+    h.remove("item-bank-personal");
+    h.clear_calls();
+    // First picker: line 1 (deleted item); retry picker: cancelled.
+    h.pick_sequence(&["1", "cancel"]);
+
+    let out = h.run(&["bank", "-p"]);
+
+    assert!(!out.status.success());
+    assert!(stdout(&out).is_empty(), "credentials copied without a pick");
+}
+
+#[test]
+fn the_newest_cached_list_wins_over_an_older_broader_one() {
+    let mut h = Harness::new();
+    h.vault("Personal", "share-personal").login(
+        "share-personal",
+        Login {
+            title: "github personal",
+            ..BANK_WORK
+        },
+    );
+    assert!(h.run(&["github", "-a", "-p"]).status.success()); // all-items list, old title
+    // The item is renamed in Proton Pass; a refresh writes a newer login-only list.
+    h.remove("item-bank-work")
+        .login("share-personal", BANK_WORK);
+    assert!(h.run(&["bank", "-r", "-p"]).status.success());
+    h.clear_calls();
+
+    let out = h.run(&["github", "-p"]);
+
+    // The older all-items entry still says "github personal"; the newer
+    // login-only one says "bank work" and must win.
+    assert!(!out.status.success(), "stdout: {}", stdout(&out));
+    assert!(stdout(&out).is_empty());
+}
+
+#[test]
+fn the_retry_does_not_read_the_same_accounts_again() {
+    let mut h = Harness::new();
+    h.vault("Personal", "share-personal")
+        .vault("Work", "share-work")
+        .vault("Other", "share-other")
+        .login(
+            "share-personal",
+            Login {
+                id: "item-a",
+                ..BANK_WORK
+            },
+        )
+        .login(
+            "share-work",
+            Login {
+                id: "item-b",
+                ..BANK_WORK
+            },
+        )
+        .login(
+            "share-other",
+            Login {
+                id: "item-c",
+                ..BANK_WORK
+            },
+        );
+    h.pick(1);
+    assert!(h.run(&["bank", "-p"]).status.success()); // caches all three
+    h.remove("item-a");
+    h.clear_calls();
+    // Sorted by vault: Other (c), Personal (a, now deleted), Work (b). Pick a,
+    // then b in the retry's picker.
+    h.pick_sequence(&["2", "2"]);
+
+    let out = h.run(&["bank", "-p"]);
+
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("could not be read"),
+        "{}",
+        stderr(&out)
+    );
+    for item in ["item-b", "item-c"] {
+        let reads = h
+            .calls_to("item view")
+            .into_iter()
+            .filter(|call| has_arg(call, &format!("--item-id={item}")) && has_arg(call, "--field"))
+            .count();
+        assert_eq!(reads, 1, "{item} account read {reads} times");
+    }
 }

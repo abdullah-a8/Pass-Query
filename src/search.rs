@@ -236,7 +236,8 @@ pub async fn enrich_duplicate_titles_with_accounts(matches: Vec<Match>) -> Resul
         .map(|(index, mut m)| {
             let duplicate_titles = Arc::clone(&duplicate_titles);
             async move {
-                if duplicate_titles.contains(&title_key(&m.title)) {
+                // An account already known (from earlier in this run) is not read again.
+                if m.account.is_none() && duplicate_titles.contains(&title_key(&m.title)) {
                     m.account = match pass_cli::get_item_account(&m).await? {
                         Some(account) => Some(account),
                         None => fallback_duplicate_label(&m),

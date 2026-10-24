@@ -84,8 +84,11 @@ fn get_current_timestamp() -> u64 {
 }
 
 fn is_fresh(timestamp: u64) -> bool {
-    // A timestamp in the future (clock moved back) counts as age zero.
-    get_current_timestamp().saturating_sub(timestamp) < MAX_AGE_SECONDS
+    // A timestamp in the future (a clock moved back, or an edited cache) is
+    // not trusted: it would never expire.
+    get_current_timestamp()
+        .checked_sub(timestamp)
+        .is_some_and(|age| age < MAX_AGE_SECONDS)
 }
 
 fn cache_safe_item_list(items: &ItemList) -> ItemList {
@@ -149,20 +152,19 @@ pub fn get_cached_vault(vault_key: &str, login_only: bool) -> Option<ItemList> {
     let cache_data = fs::read_to_string(&cache_path).ok()?;
     let cache = parse_cache(&cache_data)?;
 
-    for cached_vault in cache.vaults {
-        if cached_vault.vault_key == vault_key {
-            let exact_scope = cached_vault.login_only == login_only;
-            let broader_all_scope = login_only && !cached_vault.login_only;
-            if !(exact_scope || broader_all_scope) {
-                continue;
-            }
-            if is_fresh(cached_vault.timestamp) {
-                return Some(cached_vault.items);
-            }
-        }
-    }
-
-    None
+    // The newest fresh entry wins: a list for all item types also serves a
+    // login-only search, but not when a newer login-only list exists (the
+    // older one may hold titles that have changed since).
+    cache
+        .vaults
+        .into_iter()
+        .filter(|cached| {
+            cached.vault_key == vault_key
+                && (cached.login_only == login_only || (login_only && !cached.login_only))
+                && is_fresh(cached.timestamp)
+        })
+        .max_by_key(|cached| (cached.timestamp, cached.login_only == login_only))
+        .map(|cached| cached.items)
 }
 
 pub fn set_cached_vault(vault_key: &str, login_only: bool, items: &ItemList) -> Result<()> {
