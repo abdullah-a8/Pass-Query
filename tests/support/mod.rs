@@ -154,22 +154,28 @@ impl Harness {
         output
     }
 
-    /// The argument logs of every fake tool, read whole rather than split
-    /// into lines or arguments, so a secret containing a newline is found too.
-    fn raw_argument_logs(&self) -> Vec<String> {
+    /// The argument logs of every fake tool, as raw bytes: neither split into
+    /// lines (a secret may contain a newline) nor decoded (one non-UTF-8 byte
+    /// must not hide the rest of a log). A log that exists but cannot be read
+    /// fails the test.
+    fn raw_argument_logs(&self) -> Vec<(PathBuf, Vec<u8>)> {
         let fake = self.fake_dir();
-        let mut logs: Vec<String> = ["calls", "fzf-args"]
-            .iter()
-            .filter_map(|name| fs::read_to_string(fake.join(name)).ok())
-            .collect();
+        let mut paths = vec![fake.join("calls"), fake.join("fzf-args")];
         if let Ok(entries) = fs::read_dir(fake.join("clipboard")) {
-            for entry in entries.flatten() {
-                if entry.path().extension().is_some_and(|ext| ext == "args") {
-                    logs.extend(fs::read_to_string(entry.path()).ok());
-                }
-            }
+            paths.extend(
+                entries
+                    .map(|entry| entry.expect("read clipboard log dir").path())
+                    .filter(|path| path.extension().is_some_and(|ext| ext == "args")),
+            );
         }
-        logs
+        paths
+            .into_iter()
+            .filter_map(|path| match fs::read(&path) {
+                Ok(bytes) => Some((path, bytes)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => panic!("read {}: {e}", path.display()),
+            })
+            .collect()
     }
 
     /// Every username, email and password in the scenario.
@@ -186,17 +192,18 @@ impl Harness {
     }
 
     fn assert_no_leaks(&self, output: &Output) {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         let argument_logs = self.raw_argument_logs();
         for secret in self.secrets() {
             assert!(
-                !stderr.contains(secret),
-                "stderr leaks {secret:?}:\n{stderr}"
+                !contains(&output.stderr, secret.as_bytes()),
+                "stderr leaks {secret:?}:\n{}",
+                String::from_utf8_lossy(&output.stderr)
             );
-            for log in &argument_logs {
+            for (path, log) in &argument_logs {
                 assert!(
-                    !log.contains(secret),
-                    "{secret:?} passed as an argument: {log}"
+                    !contains(log, secret.as_bytes()),
+                    "{secret:?} passed as an argument ({})",
+                    path.display()
                 );
             }
         }
@@ -458,6 +465,13 @@ fn view(item: &Item) -> Value {
         },
         "attachments": [],
     })
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    needle.is_empty()
+        || haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
 }
 
 fn assert_only_keys(value: &Value, allowed: &[&str]) {
