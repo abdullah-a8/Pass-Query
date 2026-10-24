@@ -7,6 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 mod cache;
+mod lookup;
 mod models;
 mod pass_cli;
 mod search;
@@ -93,38 +94,8 @@ fn print_credentials(username: Option<&str>, password: &str) {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Clear cache if refresh flag is set
-    if cli.refresh {
-        cache::clear_cache()?;
-    }
-
-    // Fetch all vaults, using a metadata-only cache when it is still fresh.
-    let vault_list = if let Some(cached) = cache::get_cached_vault_list() {
-        cached
-    } else {
-        let vaults = pass_cli::fetch_vaults().await?;
-        cache::set_cached_vault_list(&vaults)?;
-        vaults
-    };
-
-    // Search with caching and limited concurrency (10 parallel max).
-    // Default to logins only; --all includes every item type.
-    let mut matches =
-        search::search_all_vaults_limited(vault_list.vaults, cli.query.clone(), !cli.all).await?;
-
-    // Only duplicate visible titles need account identifiers in the picker.
-    // These labels are kept in memory and never written to the cache.
-    if matches.len() > 1 {
-        matches = search::enrich_duplicate_titles_with_accounts(matches).await?;
-    }
-
-    // Handle selection with fzf
-    let selected = selection::select_item(matches)?;
-
-    // Fetch credentials fresh via `item view`. The `item list` output is a
-    // secret-free summary (pass-cli 2.0.3+), so credentials are never cached
-    // and are only ever read for the single item the user selected.
-    let (username, password) = pass_cli::get_item_credentials(&selected).await?;
+    let lookup::Credentials { username, password } =
+        lookup::find_credentials(&cli.query, !cli.all, cli.refresh).await?;
 
     if cli.print {
         print_credentials(username.as_deref(), &password);
