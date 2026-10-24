@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -66,6 +66,29 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
     Ok(())
 }
 
+/// Print mode. On a terminal, control characters in a credential are shown
+/// escaped (with a warning), so a crafted value cannot drive the terminal; to
+/// a pipe or file the values are written exactly.
+fn print_credentials(username: Option<&str>, password: &str) {
+    let to_terminal = std::io::stdout().is_terminal();
+    let mut escaped = false;
+    if let Some(username) = username {
+        let (shown, was_escaped) = text::for_stdout(username, to_terminal);
+        escaped |= was_escaped;
+        println!("Username: {shown}");
+    }
+    let (shown, was_escaped) = text::for_stdout(password, to_terminal);
+    escaped |= was_escaped;
+    println!("Password: {shown}");
+    if escaped {
+        eprintln!(
+            "{} The credentials contain control characters, shown escaped. \
+             Use clipboard mode, or pipe the output, for the exact value.",
+            "⚠".yellow()
+        );
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -104,11 +127,7 @@ async fn main() -> Result<()> {
     let (username, password) = pass_cli::get_item_credentials(&selected).await?;
 
     if cli.print {
-        // Print mode: output to stdout
-        if let Some(ref u) = username {
-            println!("Username: {}", u);
-        }
-        println!("Password: {}", password);
+        print_credentials(username.as_deref(), &password);
     } else {
         // Clipboard mode: copy username then password
         if let Some(ref u) = username {
