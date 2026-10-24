@@ -310,17 +310,38 @@ fn a_hung_clipboard_read_is_stopped_so_the_helper_ends() {
     );
     let pid = std::fs::read_to_string(&pid_file).unwrap();
 
-    let alive = || {
-        std::process::Command::new("kill")
-            .args(["-0", &pid])
-            .stderr(std::process::Stdio::null())
-            .status()
-            .unwrap()
-            .success()
-    };
     assert!(
-        eventually(10 * SECOND, || !alive()),
+        eventually(10 * SECOND, || !alive(&pid)),
         "the hung read was killed"
+    );
+}
+
+/// Whether process `pid` still exists.
+fn alive(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+}
+
+#[test]
+fn a_clipboard_read_whose_output_stays_open_does_not_hold_the_helper() {
+    let h = harness();
+    let pid_file = h.linger_after_paste();
+
+    let out = h.run(&["wifi", "--clear-after", "1"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert!(
+        eventually(5 * SECOND, || pid_file.exists()),
+        "the helper read the clipboard"
+    );
+    let helper = std::fs::read_to_string(&pid_file).unwrap();
+
+    assert!(
+        eventually(10 * SECOND, || !alive(&helper)),
+        "the helper ended"
     );
 }
 

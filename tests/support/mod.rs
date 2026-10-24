@@ -447,6 +447,13 @@ impl Harness {
         self.fake_dir().join("paste-pid")
     }
 
+    /// Make reading the clipboard leave a process behind holding its output.
+    /// Returns where the reading process's pid will be written.
+    pub fn linger_after_paste(&self) -> PathBuf {
+        fs::write(self.fake_dir().join("paste-linger"), "").unwrap();
+        self.fake_dir().join("paste-parent-pid")
+    }
+
     /// Replace the clipboard's contents, as another application would.
     pub fn set_clipboard(&self, text: &str) {
         fs::write(self.fake_dir().join("clipboard-now"), text).unwrap();

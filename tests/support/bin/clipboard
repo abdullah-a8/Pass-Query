@@ -49,6 +49,12 @@ paste() {
         printf '%s' "$$" >"$dir/paste-pid"
         exec sleep 30
     fi
+    # paste-linger: answer and exit, leaving a process behind that holds
+    # the output open. The reader's pid (the clear helper) is kept.
+    if [ -f "$dir/paste-linger" ]; then
+        printf '%s' "$PPID" >"$dir/paste-parent-pid"
+        sleep 30 &
+    fi
     if [ ! -s "$now" ] && [ "$tool" != pbpaste ]; then
         echo "$tool: nothing is copied" >&2
         exit 1

@@ -281,11 +281,15 @@ fn run_bounded(program: &str, args: &[&str], capture: bool) -> Result<Vec<u8>> {
         })
         .stderr(Stdio::null())
         .spawn()?;
-    let reader = child.stdout.take().map(|mut stdout| {
+    // The reader hands its result over a channel, so a process left behind
+    // holding stdout open cannot keep the helper waiting past the deadline.
+    let output = child.stdout.take().map(|mut stdout| {
+        let (send, receive) = mpsc::channel();
         std::thread::spawn(move || {
             let mut bytes = Vec::new();
-            stdout.read_to_end(&mut bytes).map(|_| bytes)
-        })
+            let _ = send.send(stdout.read_to_end(&mut bytes).map(|_| bytes));
+        });
+        receive
     });
     let deadline = Instant::now() + HELPER_COMMAND_LIMIT;
     let status = loop {
@@ -302,10 +306,13 @@ fn run_bounded(program: &str, args: &[&str], capture: bool) -> Result<Vec<u8>> {
     if !status.success() {
         bail!("{program} failed ({status})");
     }
-    match reader {
-        Some(reader) => Ok(reader
-            .join()
-            .map_err(|_| anyhow::anyhow!("{program} reader panicked"))??),
+    match output {
+        Some(output) => {
+            match output.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(bytes) => Ok(bytes?),
+                Err(_) => bail!("{program} left its output open"),
+            }
+        }
         None => Ok(Vec::new()),
     }
 }
