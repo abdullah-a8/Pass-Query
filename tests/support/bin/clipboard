@@ -41,7 +41,12 @@ copy() {
     fi
 }
 
+# wl-paste, xclip -o and xsel -o fail on an empty clipboard; pbpaste does not.
 paste() {
+    if [ ! -s "$now" ] && [ "$tool" != pbpaste ]; then
+        echo "$tool: nothing is copied" >&2
+        exit 1
+    fi
     cat "$now" 2>/dev/null || true
 }
 

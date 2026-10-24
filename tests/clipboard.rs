@@ -282,6 +282,22 @@ fn a_copy_slower_than_the_delay_is_still_cleared() {
 }
 
 #[test]
+fn a_copy_that_lands_late_and_hangs_is_still_cleared() {
+    let h = harness();
+    h.slow_copy(3);
+    h.hang_after_copy();
+    let pq = h.spawn(&["wifi", "--clear-after", "1"]);
+    assert!(eventually(6 * SECOND, || h.clipboard_now() == "wifi-secret"));
+
+    pq.kill();
+
+    assert!(
+        eventually(5 * SECOND, || h.clipboard_now().is_empty()),
+        "checked again after the late copy"
+    );
+}
+
+#[test]
 fn something_copied_since_is_not_cleared() {
     let h = harness();
 

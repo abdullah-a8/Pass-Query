@@ -215,10 +215,12 @@ const COPIED: &str = "copied";
 /// (hex) on stdin, then "copied" once pq has copied the secret. Never prints:
 /// its output goes nowhere.
 ///
-/// At each deadline it clears the clipboard if it still holds the
-/// fingerprinted text. The first deadline is `seconds` after it starts, which
-/// covers a pq that dies or hangs mid-copy; "copied" sets a new one `seconds`
-/// later, so a slow copy is still cleared a full delay after it lands.
+/// A check clears the clipboard if it still holds the fingerprinted text.
+/// While pq is still copying, the helper checks every `seconds`, so a pq that
+/// dies or hangs mid-copy is covered; a failed check (an empty clipboard makes
+/// wl-paste fail) settles nothing. "copied" schedules the final check
+/// `seconds` later, so a slow copy is still cleared a full delay after it
+/// lands. If pq goes away without it, the next check is the last.
 pub fn run_clear_helper(mut args: impl Iterator<Item = String>) -> Result<()> {
     let delay = Duration::from_secs(
         args.next()
@@ -243,12 +245,12 @@ pub fn run_clear_helper(mut args: impl Iterator<Item = String>) -> Result<()> {
         Ok(())
     };
 
-    let (copied, from_pq) = mpsc::channel();
+    let (to_helper, from_pq) = mpsc::channel();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
             match line {
                 Ok(line) if line == COPIED => {
-                    let _ = copied.send(());
+                    let _ = to_helper.send(());
                 }
                 Ok(_) => {}
                 Err(_) => break,
@@ -256,28 +258,18 @@ pub fn run_clear_helper(mut args: impl Iterator<Item = String>) -> Result<()> {
         }
     });
 
-    let mut was_copied = false;
+    let mut copied = false;
     loop {
         match from_pq.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(()) => {
-                was_copied = true;
+                copied = true;
                 deadline = Instant::now() + delay;
             }
+            Err(RecvTimeoutError::Timeout) if copied => return clear_if_unchanged(),
             Err(RecvTimeoutError::Timeout) => {
-                clear_if_unchanged()?;
-                if was_copied {
-                    return Ok(());
-                }
-                // pq is still copying: wait for it to finish or go away.
-                match from_pq.recv() {
-                    Ok(()) => {
-                        was_copied = true;
-                        deadline = Instant::now() + delay;
-                    }
-                    Err(_) => return Ok(()),
-                }
+                let _ = clear_if_unchanged();
+                deadline = Instant::now() + delay;
             }
-            // pq has exited: the deadline already set is the last.
             Err(RecvTimeoutError::Disconnected) => {
                 std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
                 return clear_if_unchanged();
