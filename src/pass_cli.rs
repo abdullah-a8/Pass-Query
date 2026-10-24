@@ -71,6 +71,52 @@ impl fmt::Display for SessionProblem {
 
 impl std::error::Error for SessionProblem {}
 
+/// The item behind a match is gone (deleted, trashed, or its vault was
+/// removed) since the match was found, typically in cached metadata. A
+/// fresh search can resolve this; other read failures it cannot.
+#[derive(Debug)]
+pub struct ItemUnavailable {
+    title: String,
+    reason: &'static str,
+}
+
+impl ItemUnavailable {
+    fn new(item: &Match, reason: &'static str) -> Self {
+        ItemUnavailable {
+            title: printable(&item.title),
+            reason,
+        }
+    }
+}
+
+impl fmt::Display for ItemUnavailable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} '{}' {}. Run pq with {} to refresh the cache.",
+            "✗".red(),
+            self.title,
+            self.reason,
+            "-r".bold()
+        )
+    }
+}
+
+impl std::error::Error for ItemUnavailable {}
+
+/// Whether a failed `item view` says the item (or its vault) no longer
+/// exists: Proton's NotExists or DeletedShare codes, or a plain 404 when the
+/// response carried no code.
+fn item_is_gone(stderr: &str) -> bool {
+    [
+        "Reason: NotExists",
+        "Reason: DeletedShare",
+        "Invalid status code: 404",
+    ]
+    .iter()
+    .any(|marker| stderr.contains(marker))
+}
+
 /// A `pass-cli` command with its logging off and killed if dropped. With
 /// MUON_LOG_LEVEL or PASS_LOG_LEVEL set in the user's environment, pass-cli
 /// logs whole HTTP requests, bearer tokens included, to stderr. A dropped
@@ -272,6 +318,10 @@ pub async fn get_item_credentials(item: &Match) -> Result<(Option<String>, Strin
         ))?;
 
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if SessionProblem::from_stderr(&stderr).is_none() && item_is_gone(&stderr) {
+            return Err(ItemUnavailable::new(item, "no longer exists").into());
+        }
         return Err(failure(
             &format!("pass-cli item view for '{}'", printable(&item.title)),
             &output.stderr,
@@ -283,12 +333,7 @@ pub async fn get_item_credentials(item: &Match) -> Result<(Option<String>, Strin
     let item_view: ItemView =
         serde_json::from_str(&stdout).context("Failed to parse item view JSON")?;
     if !item_view.item.is_active() {
-        anyhow::bail!(
-            "{} '{}' is in the trash. Run pq with {} to refresh the cache.",
-            "✗".red(),
-            printable(&item.title),
-            "-r".bold()
-        );
+        return Err(ItemUnavailable::new(item, "is in the trash").into());
     }
 
     let username = item_view.item.content.get_username();
@@ -370,6 +415,17 @@ mod tests {
             SessionProblem::from_stderr(stderr),
             Some(SessionProblem::Invalidated)
         );
+    }
+
+    #[test]
+    fn recognises_an_item_that_no_longer_exists() {
+        assert!(item_is_gone(
+            "Error: Error retrieving item\n\nCaused by:\n    Could not perform operation. Reason: NotExists"
+        ));
+        assert!(item_is_gone("Reason: DeletedShare"));
+        assert!(item_is_gone("Error: Invalid status code: 404 Not Found"));
+        assert!(!item_is_gone("Error: Error opening item"));
+        assert!(!item_is_gone("Reason: NotAllowed"));
     }
 
     #[test]

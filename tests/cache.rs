@@ -415,3 +415,28 @@ fn the_retry_does_not_read_the_same_accounts_again() {
         assert_eq!(reads, 1, "{item} account read {reads} times");
     }
 }
+
+#[test]
+fn a_read_error_that_is_not_about_the_cache_is_reported_without_a_retry() {
+    let h = personal_vault();
+    assert!(h.run(&["github", "-p"]).status.success()); // cached
+    h.clear_calls();
+    h.fail("item-view", "Error: Error opening item\n");
+
+    let out = h.run(&["github", "-p"]);
+
+    // A fresh search cannot fix this, so there is none.
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("Error opening item"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        !stderr(&out).contains("searching again"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(h.calls_to("vault list").is_empty());
+    assert_eq!(h.calls_to("item view").len(), 1);
+}

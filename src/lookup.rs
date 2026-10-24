@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::cache;
 use crate::models::VaultList;
-use crate::pass_cli::{self, SessionProblem};
+use crate::pass_cli::{self, ItemUnavailable};
 use crate::search::{self, CacheUse};
 use crate::selection;
 use crate::text::printable;
@@ -84,9 +84,10 @@ pub async fn find_credentials(query: &str, login_only: bool, refresh: bool) -> R
 
         match pass_cli::get_item_credentials(&selected).await {
             Ok((username, password)) => return Ok(Credentials { username, password }),
-            // A cached match may since have been deleted or moved. A session
-            // problem is not about the cache, so it is reported as is.
-            Err(e) if may_retry && e.downcast_ref::<SessionProblem>().is_none() => {
+            // A cached match may since have been deleted, trashed or moved,
+            // which a fresh search resolves. Any other failure (a session
+            // problem, unreadable output) is reported as is.
+            Err(e) if may_retry && e.downcast_ref::<ItemUnavailable>().is_some() => {
                 eprintln!(
                     "{} '{}' could not be read; searching again with fresh data",
                     "⟳".cyan(),
@@ -121,6 +122,7 @@ async fn load_vaults(use_cache: bool) -> Result<(VaultList, bool)> {
         return Ok((cached, true));
     }
     let vaults = pass_cli::fetch_vaults().await?;
-    cache::set_cached_vault_list(&vaults)?;
+    // The cache only saves time; failing to write it must not stop the search.
+    let _ = cache::set_cached_vault_list(&vaults);
     Ok((vaults, false))
 }
