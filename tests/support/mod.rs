@@ -170,7 +170,7 @@ impl Harness {
     fn assert_no_leaks(&self, output: &Output) {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let mut argv: Vec<String> = self.calls().into_iter().flatten().collect();
-        argv.extend(self.fzf_args());
+        argv.extend(self.all_fzf_args());
         argv.extend(self.copies().into_iter().map(|(_, args)| args));
         for secret in self.secrets() {
             assert!(
@@ -223,9 +223,18 @@ impl Harness {
             .collect()
     }
 
-    /// The arguments fzf was started with, tab-separated.
+    /// The arguments of the last fzf invocation, tab-separated.
     pub fn fzf_args(&self) -> Option<String> {
-        fs::read_to_string(self.fake_dir().join("fzf-args")).ok()
+        self.all_fzf_args().pop()
+    }
+
+    /// The arguments of every fzf invocation, one tab-separated string each.
+    fn all_fzf_args(&self) -> Vec<String> {
+        fs::read_to_string(self.fake_dir().join("fzf-args"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
     }
 
     pub fn fzf_input(&self) -> Option<String> {
