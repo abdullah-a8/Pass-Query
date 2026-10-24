@@ -12,6 +12,11 @@ use crate::models::{Item, ItemList, Vault, VaultList};
 
 const CACHE_TTL_SECONDS: u64 = 300; // 5 minutes
 
+/// Bumped whenever cached contents change meaning, so caches written by an
+/// older pq are discarded instead of misread. 2: item lists exclude trashed
+/// items.
+const CACHE_FORMAT_VERSION: u32 = 2;
+
 #[derive(Serialize, Deserialize)]
 struct CachedVault {
     vault_name: String,
@@ -27,12 +32,31 @@ struct CachedVaultList {
     timestamp: u64,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct Cache {
+    #[serde(default)]
+    version: u32,
     #[serde(default)]
     vault_list: Option<CachedVaultList>,
     #[serde(default)]
     vaults: Vec<CachedVault>,
+}
+
+impl Default for Cache {
+    fn default() -> Self {
+        Cache {
+            version: CACHE_FORMAT_VERSION,
+            vault_list: None,
+            vaults: Vec::new(),
+        }
+    }
+}
+
+/// Parse a cache file, treating one from another format version as empty.
+fn parse_cache(data: &str) -> Option<Cache> {
+    serde_json::from_str::<Cache>(data)
+        .ok()
+        .filter(|cache| cache.version == CACHE_FORMAT_VERSION)
 }
 
 fn get_cache_path() -> Result<PathBuf> {
@@ -72,6 +96,7 @@ fn cache_safe_item_list(items: &ItemList) -> ItemList {
                 share_id: item.share_id.clone(),
                 title: item.title.clone(),
                 item_type: item.item_type.clone(),
+                state: item.state.clone(),
             })
             .collect(),
     }
@@ -117,7 +142,7 @@ pub fn get_cached_vault(vault_name: &str, login_only: bool) -> Option<ItemList> 
     }
 
     let cache_data = fs::read_to_string(&cache_path).ok()?;
-    let cache: Cache = serde_json::from_str(&cache_data).ok()?;
+    let cache = parse_cache(&cache_data)?;
 
     for cached_vault in cache.vaults {
         if cached_vault.vault_name == vault_name {
@@ -149,7 +174,7 @@ pub fn set_cached_vault(vault_name: &str, login_only: bool, items: &ItemList) ->
     // Load existing cache or create new one
     let mut cache = if cache_path.exists() {
         let cache_data = fs::read_to_string(&cache_path)?;
-        serde_json::from_str(&cache_data).unwrap_or_default()
+        parse_cache(&cache_data).unwrap_or_default()
     } else {
         Cache::default()
     };
@@ -194,7 +219,7 @@ pub fn get_cached_vault_list() -> Option<VaultList> {
     }
 
     let cache_data = fs::read_to_string(&cache_path).ok()?;
-    let cache: Cache = serde_json::from_str(&cache_data).ok()?;
+    let cache = parse_cache(&cache_data)?;
     let cached = cache.vault_list?;
 
     if cache_entry_is_usable(cached.timestamp) {
@@ -213,7 +238,7 @@ pub fn set_cached_vault_list(vaults: &VaultList) -> Result<()> {
 
     let mut cache = if cache_path.exists() {
         let cache_data = fs::read_to_string(&cache_path)?;
-        serde_json::from_str(&cache_data).unwrap_or_default()
+        parse_cache(&cache_data).unwrap_or_default()
     } else {
         Cache::default()
     };
@@ -249,6 +274,7 @@ mod tests {
                 share_id: Some("share-1".to_string()),
                 title: "github".to_string(),
                 item_type: "login".to_string(),
+                state: Some("Active".to_string()),
             }],
         };
 

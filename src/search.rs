@@ -50,7 +50,9 @@ async fn search_vault(vault: Vault, query: String, login_only: bool) -> Result<V
         cached
     } else {
         // Not in cache, fetch from pass-cli
-        let items = pass_cli::list_vault_items(&vault, login_only).await?;
+        let items = pass_cli::list_vault_items(&vault, login_only)
+            .await?
+            .into_active();
         // Store in cache for future use
         let _ = cache::set_cached_vault(&vault.name, login_only, &items);
         items
@@ -195,6 +197,7 @@ mod tests {
             share_id: Some("share-1".to_string()),
             title: title.to_string(),
             item_type: item_type.to_string(),
+            state: None,
         }
     }
 

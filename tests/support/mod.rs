@@ -40,6 +40,7 @@ struct Item {
     id: &'static str,
     title: &'static str,
     content: Content,
+    trashed: bool,
 }
 
 pub struct Harness {
@@ -83,6 +84,7 @@ impl Harness {
             id: login.id,
             title: login.title,
             content: Content::Login(login),
+            trashed: false,
         });
         self
     }
@@ -98,7 +100,15 @@ impl Harness {
             id,
             title,
             content: Content::Note,
+            trashed: false,
         });
+        self
+    }
+
+    /// Move an item to the trash. pass-cli keeps listing it, with state "Trashed".
+    pub fn trash(&mut self, id: &str) -> &mut Self {
+        let item = self.items.iter_mut().find(|item| item.id == id);
+        item.expect("trash an existing item").trashed = true;
         self
     }
 
@@ -268,7 +278,7 @@ impl Harness {
     pub fn cache_json(&self) -> Value {
         let text = fs::read_to_string(self.cache_file()).expect("cache written");
         let cache: Value = serde_json::from_str(&text).expect("cache is JSON");
-        assert_only_keys(&cache, &["vault_list", "vaults"]);
+        assert_only_keys(&cache, &["version", "vault_list", "vaults"]);
         if let Some(list) = cache.get("vault_list").filter(|v| !v.is_null()) {
             assert_only_keys(list, &["vaults", "timestamp"]);
             assert_only_keys(&list["vaults"], &["vaults"]);
@@ -280,7 +290,7 @@ impl Harness {
             assert_only_keys(vault, &["vault_name", "login_only", "items", "timestamp"]);
             assert_only_keys(&vault["items"], &["items"]);
             for item in vault["items"]["items"].as_array().unwrap() {
-                assert_only_keys(item, &["id", "share_id", "title", "item_type"]);
+                assert_only_keys(item, &["id", "share_id", "title", "item_type", "state"]);
             }
         }
         let mut strings = Vec::new();
@@ -428,7 +438,7 @@ fn summary(item: &Item) -> Value {
         "id": item.id,
         "share_id": item.share_id,
         "vault_id": format!("vault-{}", item.share_id),
-        "state": "Active",
+        "state": state(item),
         "flags": [],
         "create_time": "2026-01-01T00:00:00",
         "modify_time": "2026-01-02T00:00:00",
@@ -464,7 +474,7 @@ fn view(item: &Item) -> Value {
                 "platform_specific": null,
                 "custom_icon": null,
             },
-            "state": "Active",
+            "state": state(item),
             "flags": [],
             "create_time": "2026-01-01T00:00:00",
             "modify_time": "2026-01-02T00:00:00",
@@ -502,6 +512,10 @@ fn collect_strings(value: &Value, out: &mut Vec<String>) {
         }),
         _ => {}
     }
+}
+
+fn state(item: &Item) -> &'static str {
+    if item.trashed { "Trashed" } else { "Active" }
 }
 
 fn write_json(path: &Path, value: &Value) {
