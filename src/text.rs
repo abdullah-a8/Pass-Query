@@ -18,6 +18,18 @@ pub fn printable(text: &str) -> String {
         .collect()
 }
 
+/// A credential as print mode writes it, and whether it had to be escaped.
+/// Written to a terminal, control characters would drive the terminal, so
+/// they are shown escaped; written to a pipe or file, the value is exact,
+/// because a script needs the real credential.
+pub fn for_stdout(value: &str, to_terminal: bool) -> (String, bool) {
+    if to_terminal && value.chars().any(must_escape) {
+        (printable(value), true)
+    } else {
+        (value.to_string(), false)
+    }
+}
+
 fn must_escape(c: char) -> bool {
     c.is_control()
         || matches!(
@@ -33,7 +45,18 @@ fn must_escape(c: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::printable;
+    use super::{for_stdout, printable};
+
+    #[test]
+    fn credentials_are_exact_when_piped_and_escaped_on_a_terminal() {
+        let value = "user\u{1b}]0;pwned\u{7}";
+        assert_eq!(for_stdout(value, false), (value.to_string(), false));
+        assert_eq!(
+            for_stdout(value, true),
+            ("user\\u{1b}]0;pwned\\u{7}".to_string(), true)
+        );
+        assert_eq!(for_stdout("plain", true), ("plain".to_string(), false));
+    }
 
     #[test]
     fn control_characters_are_shown_escaped() {

@@ -346,3 +346,27 @@ fn a_failing_vault_is_reported_and_the_others_still_searched() {
     assert!(stderr(&out).contains("vault search failed"));
     assert_eq!(stdout(&out), "Username: octocat\nPassword: github-secret\n");
 }
+
+#[test]
+fn print_mode_writes_the_exact_value_to_a_pipe() {
+    let mut h = Harness::new();
+    h.vault("Personal", "share-personal").login(
+        "share-personal",
+        Login {
+            id: "item-odd",
+            title: "odd",
+            username: "user\u{1b}[31m",
+            email: "",
+            password: "pass\tword",
+        },
+    );
+
+    let out = h.run(&["odd", "-p"]);
+
+    // stdout is a pipe here: scripts get the value exactly as stored.
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        "Username: user\u{1b}[31m\nPassword: pass\tword\n"
+    );
+}
