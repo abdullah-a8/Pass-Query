@@ -126,7 +126,10 @@ fn copy_credentials(
     clipboard.copy(&credentials.password)?;
     match clearing {
         None => eprintln!("{} Password copied", "✓".green()),
-        Some(Ok(())) => eprintln!("{} Password copied (clears in {clear_after}s)", "✓".green()),
+        Some(Ok(pending)) => {
+            pending.copied();
+            eprintln!("{} Password copied (clears in {clear_after}s)", "✓".green());
+        }
         Some(Err(e)) => eprintln!(
             "{} Password copied, but clearing it later failed to start: {e:#}",
             "⚠".yellow()

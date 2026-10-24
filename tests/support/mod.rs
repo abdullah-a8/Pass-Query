@@ -435,6 +435,11 @@ impl Harness {
         fs::write(self.fake_dir().join("clipboard-hang"), "").unwrap();
     }
 
+    /// Make every copy take `seconds` before the text reaches the clipboard.
+    pub fn slow_copy(&self, seconds: u32) {
+        fs::write(self.fake_dir().join("clipboard-slow"), seconds.to_string()).unwrap();
+    }
+
     /// Replace the clipboard's contents, as another application would.
     pub fn set_clipboard(&self, text: &str) {
         fs::write(self.fake_dir().join("clipboard-now"), text).unwrap();

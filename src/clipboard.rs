@@ -10,8 +10,9 @@ use colored::Colorize;
 use sha2::{Digest, Sha256};
 use std::io::{BufRead, Read, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::process::{ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::{Duration, Instant};
 
 /// The hidden first argument that runs pq as the clear helper.
 pub const CLEAR_HELPER_ARG: &str = "__clear-clipboard";
@@ -167,9 +168,10 @@ impl Clipboard {
         }
     }
 
-    /// Start a detached helper that clears the clipboard after `delay` if it
+    /// Start a detached helper that clears the clipboard `delay` after now,
+    /// or `delay` after [`PendingClear::copied`] if that comes first, if it
     /// still holds `secret`. pq does not wait for it.
-    pub fn clear_later(&self, secret: &str, delay: Duration) -> Result<()> {
+    pub fn clear_later(&self, secret: &str, delay: Duration) -> Result<PendingClear> {
         let salt = random_salt()?;
         let fingerprint = fingerprint(&salt, secret.as_bytes());
         let mut command = Command::new(std::env::current_exe()?);
@@ -187,35 +189,101 @@ impl Clipboard {
             .context("start the clipboard clear helper")?;
         let mut stdin = helper.stdin.take().context("helper stdin")?;
         writeln!(stdin, "{} {}", hex(&salt), hex(&fingerprint))?;
-        Ok(())
+        Ok(PendingClear { stdin })
     }
 }
 
+/// A started clear helper, still listening to pq.
+pub struct PendingClear {
+    stdin: ChildStdin,
+}
+
+impl PendingClear {
+    /// Tell the helper the secret is on the clipboard now, so its delay
+    /// starts again from here: a slow copy is still cleared a full delay
+    /// after it lands.
+    pub fn copied(mut self) {
+        // If the helper is gone there is nothing to tell.
+        let _ = writeln!(self.stdin, "{COPIED}");
+    }
+}
+
+/// The line pq sends the helper once the secret is on the clipboard.
+const COPIED: &str = "copied";
+
 /// The clear helper: `pq __clear-clipboard <seconds>`, with "<salt> <fingerprint>"
-/// (hex) on stdin. Sleeps, then clears the clipboard if it still holds the
-/// fingerprinted text. Never prints: its output goes nowhere.
+/// (hex) on stdin, then "copied" once pq has copied the secret. Never prints:
+/// its output goes nowhere.
+///
+/// At each deadline it clears the clipboard if it still holds the
+/// fingerprinted text. The first deadline is `seconds` after it starts, which
+/// covers a pq that dies or hangs mid-copy; "copied" sets a new one `seconds`
+/// later, so a slow copy is still cleared a full delay after it lands.
 pub fn run_clear_helper(mut args: impl Iterator<Item = String>) -> Result<()> {
-    let delay: u64 = args
-        .next()
-        .context("missing delay")?
-        .parse()
-        .context("invalid delay")?;
+    let delay = Duration::from_secs(
+        args.next()
+            .context("missing delay")?
+            .parse()
+            .context("invalid delay")?,
+    );
+    let mut deadline = Instant::now() + delay;
     let mut line = String::new();
     std::io::stdin().lock().read_line(&mut line)?;
     let mut parts = line.split_whitespace();
     let salt = unhex(parts.next().context("missing salt")?)?;
     let expected = unhex(parts.next().context("missing fingerprint")?)?;
+    let clear_if_unchanged = || -> Result<()> {
+        let clipboard = Clipboard::detect()?;
+        // If the clipboard cannot be read, leave it alone rather than risk
+        // clearing something the user copied since.
+        let current = clipboard.paste()?;
+        if fingerprint(&salt, &current).as_slice() == expected.as_slice() {
+            clipboard.clear()?;
+        }
+        Ok(())
+    };
 
-    std::thread::sleep(Duration::from_secs(delay));
+    let (copied, from_pq) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            match line {
+                Ok(line) if line == COPIED => {
+                    let _ = copied.send(());
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    });
 
-    let clipboard = Clipboard::detect()?;
-    // If the clipboard cannot be read, leave it alone rather than risk
-    // clearing something the user copied since.
-    let current = clipboard.paste()?;
-    if fingerprint(&salt, &current).as_slice() == expected.as_slice() {
-        clipboard.clear()?;
+    let mut was_copied = false;
+    loop {
+        match from_pq.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(()) => {
+                was_copied = true;
+                deadline = Instant::now() + delay;
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                clear_if_unchanged()?;
+                if was_copied {
+                    return Ok(());
+                }
+                // pq is still copying: wait for it to finish or go away.
+                match from_pq.recv() {
+                    Ok(()) => {
+                        was_copied = true;
+                        deadline = Instant::now() + delay;
+                    }
+                    Err(_) => return Ok(()),
+                }
+            }
+            // pq has exited: the deadline already set is the last.
+            Err(RecvTimeoutError::Disconnected) => {
+                std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                return clear_if_unchanged();
+            }
+        }
     }
-    Ok(())
 }
 
 fn fingerprint(salt: &[u8], text: &[u8]) -> [u8; 32] {

@@ -20,6 +20,10 @@ copy() {
         echo "$tool: cannot open display" >&2
         exit 1
     fi
+    # clipboard-slow holds seconds to wait before publishing the text.
+    if [ -f "$dir/clipboard-slow" ]; then
+        sleep "$(cat "$dir/clipboard-slow")"
+    fi
     mkdir -p "$dir/clipboard"
     n=$(find "$dir/clipboard" -name '*.txt' | wc -l | tr -d ' ')
     printf '%s' "$tool" >"$dir/clipboard/$n.tool"
