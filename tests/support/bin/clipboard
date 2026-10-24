@@ -20,15 +20,18 @@ copy() {
         echo "$tool: cannot open display" >&2
         exit 1
     fi
-    # clipboard-slow holds seconds to wait before publishing the text.
-    if [ -f "$dir/clipboard-slow" ]; then
+    mkdir -p "$dir/clipboard"
+    incoming="$dir/clipboard-incoming.$$"
+    cat >"$incoming"
+    # clipboard-slow holds seconds to wait before publishing text. Copying
+    # nothing (how pq clears with xclip and pbcopy) is never slowed.
+    if [ -f "$dir/clipboard-slow" ] && [ -s "$incoming" ]; then
         sleep "$(cat "$dir/clipboard-slow")"
     fi
-    mkdir -p "$dir/clipboard"
     n=$(find "$dir/clipboard" -name '*.txt' | wc -l | tr -d ' ')
     printf '%s' "$tool" >"$dir/clipboard/$n.tool"
     printf '%s' "$args" >"$dir/clipboard/$n.args"
-    cat >"$dir/clipboard/$n.txt"
+    cat "$incoming" >"$dir/clipboard/$n.txt"
     cp "$dir/clipboard/$n.txt" "$now"
     # clipboard-linger: stay behind serving the selection, as wl-copy and
     # xclip do, holding on to the stderr pq gave this tool.
@@ -36,7 +39,7 @@ copy() {
         sleep 5 &
     fi
     # clipboard-hang: publish the text, then never exit.
-    if [ -f "$dir/clipboard-hang" ]; then
+    if [ -f "$dir/clipboard-hang" ] && [ -s "$now" ]; then
         sleep 10
     fi
 }
