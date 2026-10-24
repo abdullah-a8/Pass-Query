@@ -235,6 +235,21 @@ fn the_password_is_cleared_after_the_delay() {
 }
 
 #[test]
+fn the_password_is_cleared_even_if_pq_dies_while_copying_it() {
+    let h = harness();
+    h.hang_after_copy();
+    let pq = h.spawn(&["wifi", "--clear-after", "1"]);
+    assert!(eventually(5 * SECOND, || h.clipboard_now() == "wifi-secret"));
+
+    pq.kill();
+
+    assert!(
+        eventually(5 * SECOND, || h.clipboard_now().is_empty()),
+        "the clear helper was already running"
+    );
+}
+
+#[test]
 fn something_copied_since_is_not_cleared() {
     let h = harness();
 

@@ -30,6 +30,10 @@ copy() {
     if [ -f "$dir/clipboard-linger" ]; then
         sleep 5 &
     fi
+    # clipboard-hang: publish the text, then never exit.
+    if [ -f "$dir/clipboard-hang" ]; then
+        sleep 10
+    fi
 }
 
 paste() {

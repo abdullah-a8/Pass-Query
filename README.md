@@ -54,6 +54,8 @@ pq --help                Show help
 7. Copies the password to the clipboard
 8. Clears the password from the clipboard after 45 seconds, unless something else has been copied since
 
+Clearing is done by a small background helper that pq starts just before copying the password, so it still happens if pq is interrupted. The helper receives only a salted hash of the password, never the password itself. When the time is up it reads the clipboard and clears it only if the clipboard still holds the password. The command-line clipboard tools offer no way to make that check and the clear one atomic step, so something copied in the instant between them would be cleared too.
+
 ## Cache Location
 
 Cache is stored at `~/.cache/pp-pass-cli/vault-cache.json` (or `$XDG_CACHE_HOME/pp-pass-cli/vault-cache.json`).

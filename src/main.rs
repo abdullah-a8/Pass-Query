@@ -119,14 +119,15 @@ fn copy_credentials(
         wait_for_enter()?;
     }
 
+    // The clear helper starts first, so the password is cleared even if pq
+    // dies or the clipboard tool hangs once the password is on the clipboard.
+    let clearing = (clear_after > 0)
+        .then(|| clipboard.clear_later(&credentials.password, Duration::from_secs(clear_after)));
     clipboard.copy(&credentials.password)?;
-    if clear_after == 0 {
-        eprintln!("{} Password copied", "✓".green());
-        return Ok(());
-    }
-    match clipboard.clear_later(&credentials.password, Duration::from_secs(clear_after)) {
-        Ok(()) => eprintln!("{} Password copied (clears in {clear_after}s)", "✓".green()),
-        Err(e) => eprintln!(
+    match clearing {
+        None => eprintln!("{} Password copied", "✓".green()),
+        Some(Ok(())) => eprintln!("{} Password copied (clears in {clear_after}s)", "✓".green()),
+        Some(Err(e)) => eprintln!(
             "{} Password copied, but clearing it later failed to start: {e:#}",
             "⚠".yellow()
         ),

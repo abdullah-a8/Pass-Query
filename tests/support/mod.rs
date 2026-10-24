@@ -430,6 +430,11 @@ impl Harness {
         fs::write(self.fake_dir().join("clipboard-linger"), "").unwrap();
     }
 
+    /// Make every copy publish its text and then hang.
+    pub fn hang_after_copy(&self) {
+        fs::write(self.fake_dir().join("clipboard-hang"), "").unwrap();
+    }
+
     /// Replace the clipboard's contents, as another application would.
     pub fn set_clipboard(&self, text: &str) {
         fs::write(self.fake_dir().join("clipboard-now"), text).unwrap();
@@ -622,6 +627,12 @@ impl Running<'_> {
     }
 
     /// Wait for pq to exit and return its output, checked for leaks.
+    /// Kill pq outright, as a crash would.
+    pub fn kill(mut self) {
+        self.child.kill().unwrap();
+        self.child.wait().unwrap();
+    }
+
     pub fn finish(self) -> Output {
         let output = self.child.wait_with_output().expect("wait for pq");
         self.harness.assert_no_leaks(&output);
