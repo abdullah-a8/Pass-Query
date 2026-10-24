@@ -43,6 +43,12 @@ copy() {
 
 # wl-paste, xclip -o and xsel -o fail on an empty clipboard; pbpaste does not.
 paste() {
+    # paste-hang: never answer, as with a stalled clipboard owner. The pid is
+    # kept so tests can check the hung paste was stopped.
+    if [ -f "$dir/paste-hang" ]; then
+        printf '%s' "$$" >"$dir/paste-pid"
+        exec sleep 30
+    fi
     if [ ! -s "$now" ] && [ "$tool" != pbpaste ]; then
         echo "$tool: nothing is copied" >&2
         exit 1

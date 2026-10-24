@@ -440,6 +440,13 @@ impl Harness {
         fs::write(self.fake_dir().join("clipboard-slow"), seconds.to_string()).unwrap();
     }
 
+    /// Make reading the clipboard hang. Returns where the hung reader's pid
+    /// will be written.
+    pub fn hang_paste(&self) -> PathBuf {
+        fs::write(self.fake_dir().join("paste-hang"), "").unwrap();
+        self.fake_dir().join("paste-pid")
+    }
+
     /// Replace the clipboard's contents, as another application would.
     pub fn set_clipboard(&self, text: &str) {
         fs::write(self.fake_dir().join("clipboard-now"), text).unwrap();

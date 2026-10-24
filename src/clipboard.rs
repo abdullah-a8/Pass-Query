@@ -138,34 +138,20 @@ impl Clipboard {
         Ok(())
     }
 
+    /// Read the clipboard. Only the clear helper reads it.
     fn paste(&self) -> Result<Vec<u8>> {
         let (program, args) = self.tool.paste_command();
-        let output = Command::new(program)
-            .args(args)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()?;
-        if !output.status.success() {
-            bail!("{program} failed ({})", output.status);
-        }
-        Ok(output.stdout)
+        run_bounded(program, args, true)
     }
 
+    /// Empty the clipboard: with the tool's clear command, or by copying
+    /// nothing (an empty stdin) where it has none.
     fn clear(&self) -> Result<()> {
-        match self.tool.clear_command() {
-            Some((program, args)) => {
-                let status = Command::new(program)
-                    .args(args)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .status()?;
-                if !status.success() {
-                    bail!("{program} failed ({status})");
-                }
-                Ok(())
-            }
-            None => self.copy(""),
-        }
+        let (program, args) = self
+            .tool
+            .clear_command()
+            .unwrap_or_else(|| self.tool.copy_command());
+        run_bounded(program, args, false).map(drop)
     }
 
     /// Start a detached helper that clears the clipboard `delay` after now,
@@ -275,6 +261,52 @@ pub fn run_clear_helper(mut args: impl Iterator<Item = String>) -> Result<()> {
                 return clear_if_unchanged();
             }
         }
+    }
+}
+
+/// How long the clear helper lets a clipboard command run. A stalled
+/// clipboard owner can make one hang, and the helper must still end.
+const HELPER_COMMAND_LIMIT: Duration = Duration::from_secs(5);
+
+/// Run a clipboard command with no input, returning its stdout if `capture`,
+/// and kill it if it runs past [`HELPER_COMMAND_LIMIT`].
+fn run_bounded(program: &str, args: &[&str], capture: bool) -> Result<Vec<u8>> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(if capture {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stderr(Stdio::null())
+        .spawn()?;
+    let reader = child.stdout.take().map(|mut stdout| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stdout.read_to_end(&mut bytes).map(|_| bytes)
+        })
+    });
+    let deadline = Instant::now() + HELPER_COMMAND_LIMIT;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("{program} timed out");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    if !status.success() {
+        bail!("{program} failed ({status})");
+    }
+    match reader {
+        Some(reader) => Ok(reader
+            .join()
+            .map_err(|_| anyhow::anyhow!("{program} reader panicked"))??),
+        None => Ok(Vec::new()),
     }
 }
 

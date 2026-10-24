@@ -298,6 +298,33 @@ fn a_copy_that_lands_late_and_hangs_is_still_cleared() {
 }
 
 #[test]
+fn a_hung_clipboard_read_is_stopped_so_the_helper_ends() {
+    let h = harness();
+    let pid_file = h.hang_paste();
+
+    let out = h.run(&["wifi", "--clear-after", "1"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert!(
+        eventually(5 * SECOND, || pid_file.exists()),
+        "the helper read the clipboard"
+    );
+    let pid = std::fs::read_to_string(&pid_file).unwrap();
+
+    let alive = || {
+        std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert!(
+        eventually(10 * SECOND, || !alive()),
+        "the hung read was killed"
+    );
+}
+
+#[test]
 fn something_copied_since_is_not_cleared() {
     let h = harness();
 
