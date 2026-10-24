@@ -1,12 +1,87 @@
 #!/bin/sh
-# Fake clipboard tool, installed as wl-copy and pbcopy. Each copy is stored
-# as clipboard/<n>.txt (n counts from 0) with its arguments in
-# clipboard/<n>.args, so tests can check order, content and that no secret
-# was passed on the command line.
+# Fake clipboard tools, installed as wl-copy, wl-paste, xclip, xsel, pbcopy
+# and pbpaste. They share one simulated clipboard, $PQ_FAKE_DIR/clipboard-now.
+# Each copy is also stored as clipboard/<n>.txt (n counts from 0), with the
+# tool's name in clipboard/<n>.tool and its arguments in clipboard/<n>.args,
+# so tests can check order, content, the tool used, and that no secret was
+# passed on a command line. Only the invocations pq is expected to make are
+# accepted.
 set -u
 dir=${PQ_FAKE_DIR:?PQ_FAKE_DIR is not set}
+tool=${0##*/}
+now="$dir/clipboard-now"
+args="$*"
 
-mkdir -p "$dir/clipboard"
-n=$(find "$dir/clipboard" -name '*.txt' | wc -l | tr -d ' ')
-for arg in "$@"; do printf '%s\t' "$arg"; done >"$dir/clipboard/$n.args"
-cat >"$dir/clipboard/$n.txt"
+copy() {
+    # clipboard-fail makes every copy fail, as with no clipboard owner.
+    # It exits without reading its input, as xclip does when it cannot open
+    # the display, so pq's write can meet a closed pipe.
+    if [ -f "$dir/clipboard-fail" ]; then
+        echo "$tool: cannot open display" >&2
+        exit 1
+    fi
+    mkdir -p "$dir/clipboard"
+    incoming="$dir/clipboard-incoming.$$"
+    cat >"$incoming"
+    # clipboard-slow holds seconds to wait before publishing text. Copying
+    # nothing (how pq clears with xclip and pbcopy) is never slowed.
+    if [ -f "$dir/clipboard-slow" ] && [ -s "$incoming" ]; then
+        sleep "$(cat "$dir/clipboard-slow")"
+    fi
+    n=$(find "$dir/clipboard" -name '*.txt' | wc -l | tr -d ' ')
+    printf '%s' "$tool" >"$dir/clipboard/$n.tool"
+    printf '%s' "$args" >"$dir/clipboard/$n.args"
+    cat "$incoming" >"$dir/clipboard/$n.txt"
+    cp "$dir/clipboard/$n.txt" "$now"
+    # clipboard-linger: stay behind serving the selection, as wl-copy and
+    # xclip do, holding on to the stderr pq gave this tool.
+    if [ -f "$dir/clipboard-linger" ]; then
+        sleep 5 &
+    fi
+    # clipboard-hang: publish the text, then never exit.
+    if [ -f "$dir/clipboard-hang" ] && [ -s "$now" ]; then
+        sleep 10
+    fi
+}
+
+# wl-paste, xclip -o and xsel -o fail on an empty clipboard; pbpaste does not.
+paste() {
+    # paste-hang: never answer, as with a stalled clipboard owner. The pid is
+    # kept so tests can check the hung paste was stopped.
+    if [ -f "$dir/paste-hang" ]; then
+        printf '%s' "$$" >"$dir/paste-pid"
+        exec sleep 30
+    fi
+    # paste-linger: answer and exit, leaving a process behind that holds
+    # the output open. The reader's pid (the clear helper) is kept.
+    if [ -f "$dir/paste-linger" ]; then
+        printf '%s' "$PPID" >"$dir/paste-parent-pid"
+        sleep 30 &
+    fi
+    if [ ! -s "$now" ] && [ "$tool" != pbpaste ]; then
+        echo "$tool: nothing is copied" >&2
+        exit 1
+    fi
+    cat "$now" 2>/dev/null || true
+}
+
+clear() {
+    : >"$now"
+}
+
+case "$tool $args" in
+"wl-copy ") copy ;;
+"wl-copy --clear") clear ;;
+"wl-paste --no-newline") paste ;;
+"xclip -selection clipboard") copy ;;
+"xclip -selection clipboard -o") paste ;;
+"xsel --clipboard --input") copy ;;
+"xsel --clipboard --output") paste ;;
+"xsel --clipboard --clear") clear ;;
+"pbcopy ") copy ;;
+"pbpaste ") paste ;;
+*)
+    echo "fake clipboard: unsupported invocation: $tool $args" >&2
+    exit 2
+    ;;
+esac

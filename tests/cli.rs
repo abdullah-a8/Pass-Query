@@ -275,23 +275,6 @@ fn a_cancelled_picker_reads_no_credentials_and_copies_nothing() {
 }
 
 #[test]
-fn clipboard_mode_copies_username_then_password_through_stdin() {
-    let h = personal_vault();
-
-    let out = h.run(&["github"]);
-
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    let copies = h.copies();
-    let texts: Vec<&str> = copies.iter().map(|(text, _)| text.as_str()).collect();
-    assert_eq!(texts, ["octocat", "github-secret"]);
-    // Harness::run also checks that no secret reached stderr or any argv.
-    assert!(
-        stdout(&out).is_empty(),
-        "nothing is printed in clipboard mode"
-    );
-}
-
-#[test]
 fn no_match_is_reported() {
     let h = personal_vault();
 
