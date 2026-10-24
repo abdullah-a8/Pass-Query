@@ -102,3 +102,25 @@ fn an_item_trashed_after_it_was_cached_is_not_copied() {
     );
     assert!(stderr(&out).contains("in the trash"), "{}", stderr(&out));
 }
+
+#[test]
+fn a_cache_entry_marked_trashed_is_not_offered() {
+    let h = personal_vault();
+    assert!(h.run(&["github", "-p"]).status.success());
+    // A cache edited (or written by another tool) to hold a trashed item.
+    let cache = std::fs::read_to_string(h.cache_file()).unwrap();
+    let mut cache: serde_json::Value = serde_json::from_str(&cache).unwrap();
+    for vault in cache["vaults"].as_array_mut().unwrap() {
+        for item in vault["items"]["items"].as_array_mut().unwrap() {
+            item["state"] = "Trashed".into();
+        }
+    }
+    h.write_cache(&cache.to_string());
+    h.clear_calls();
+
+    let out = h.run(&["github", "-p"]);
+
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("No items found"));
+    assert!(h.calls_to("item view").is_empty());
+}
