@@ -22,10 +22,14 @@ command="${1:-}-${2:-}"
 # (it is not once pq has made itself non-dumpable).
 probe="core=$(ulimit -c)"
 if [ -e "/proc/$PPID/environ" ]; then
-    if cat "/proc/$PPID/environ" >/dev/null 2>&1; then
+    # Only a refusal counts as protection; any other failure is reported as such.
+    if denied=$(cat "/proc/$PPID/environ" 2>&1 >/dev/null); then
         probe="$probe proc=readable"
     else
-        probe="$probe proc=protected"
+        case "$denied" in
+        *"Permission denied"*) probe="$probe proc=protected" ;;
+        *) probe="$probe proc=unreadable" ;;
+        esac
     fi
 fi
 printf '%s\n' "$probe" >"$dir/probe"
