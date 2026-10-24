@@ -92,7 +92,7 @@ jobs:
           fi
           name="pq-$version-$TARGET"
           mkdir -p "dist/$name"
-          cp "target/$TARGET/release/pq" README.md "dist/$name/"
+          cp "target/$TARGET/release/pq" README.md LICENSE "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
           rm -r "dist/$name"
