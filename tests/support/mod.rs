@@ -154,6 +154,24 @@ impl Harness {
         .unwrap();
     }
 
+    /// Make `pass-cli item view` for one item take `seconds` to answer.
+    pub fn slow_item(&self, item_id: &str, seconds: u32) {
+        let dir = self.fake_dir().join("delay");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(format!("item-view.{item_id}")),
+            seconds.to_string(),
+        )
+        .unwrap();
+    }
+
+    /// Make `pass-cli item view` fail for one item only.
+    pub fn fail_item(&self, item_id: &str, stderr: &str) {
+        let dir = self.fake_dir().join("fail");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(format!("item-view.{item_id}")), stderr).unwrap();
+    }
+
     /// Choose the 1-based picker line fzf returns.
     pub fn pick(&self, line: usize) {
         fs::write(self.fake_dir().join("fzf-pick"), line.to_string()).unwrap();

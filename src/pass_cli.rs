@@ -13,9 +13,12 @@ use crate::text::printable;
 pub enum SessionProblem {
     /// The session lock (pass-cli 2.2+) is engaged.
     Locked,
-    /// Proton ended the session; pass-cli has logged out.
+    /// Proton ended the session, or pass-cli logged out by itself (its local
+    /// key went missing, or PROTON_PASS_ENVIRONMENT changed).
     Invalidated,
     NotLoggedIn,
+    /// The system keyring asked for permission and it was not given.
+    KeyringDenied,
 }
 
 impl SessionProblem {
@@ -24,8 +27,13 @@ impl SessionProblem {
         // An ended session wins: pass-cli can print a lock diagnostic early
         // (during startup telemetry) and then exit because the session was
         // invalidated, and unlocking an ended session does not help.
-        if s.contains("session has been invalidated") {
+        if s.contains("session has been invalidated")
+            || s.contains("forcing logout")
+            || s.contains("logging you out")
+        {
             Some(Self::Invalidated)
+        } else if s.contains("please authorize access to the system keyring") {
+            Some(Self::KeyringDenied)
         } else if s.contains("session is locked") || s.contains("sessionlocked") {
             Some(Self::Locked)
         } else if s.contains("requires an authenticated client")
@@ -41,15 +49,23 @@ impl SessionProblem {
 
 impl fmt::Display for SessionProblem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (problem, hint) = match self {
+        let (problem, command) = match self {
             Self::Locked => (
                 "Your Proton Pass session is locked.",
                 "pass-cli session unlock",
             ),
             Self::Invalidated => ("Your Proton Pass session has ended.", "pass-cli login"),
             Self::NotLoggedIn => ("Not logged in to Proton Pass.", "pass-cli login"),
+            Self::KeyringDenied => {
+                return write!(
+                    f,
+                    "{} pass-cli was not allowed to use the system keyring. \
+                     Unlock your keyring or allow the access request, then try again.",
+                    "✗".red()
+                );
+            }
         };
-        write!(f, "{} {problem} Run: {}", "✗".red(), hint.bold())
+        write!(f, "{} {problem} Run: {}", "✗".red(), command.bold())
     }
 }
 
@@ -321,6 +337,18 @@ mod tests {
             (
                 "Command is not logout there is no session",
                 Some(SessionProblem::NotLoggedIn),
+            ),
+            (
+                "Please authorize access to the system keyring",
+                Some(SessionProblem::KeyringDenied),
+            ),
+            (
+                "Error: Local encryption key not found but local data exists. Forcing logout for security.",
+                Some(SessionProblem::Invalidated),
+            ),
+            (
+                "PROTON_PASS_ENVIRONMENT has switched! Logging you out. Please log back in again",
+                Some(SessionProblem::Invalidated),
             ),
             ("failed to connect to host: timed out", None),
             ("Error: Could not perform operation. Reason: NotFound", None),

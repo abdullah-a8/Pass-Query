@@ -169,9 +169,10 @@ fn duplicate_title_keys(matches: &[Match]) -> HashSet<String> {
 pub async fn enrich_duplicate_titles_with_accounts(matches: Vec<Match>) -> Result<Vec<Match>> {
     const MAX_CONCURRENT: usize = 10;
     let duplicate_titles = Arc::new(duplicate_title_keys(&matches));
+    let count = matches.len();
 
-    stream::iter(matches)
-        .map(|mut m| {
+    let mut lookups = stream::iter(matches.into_iter().enumerate())
+        .map(|(index, mut m)| {
             let duplicate_titles = Arc::clone(&duplicate_titles);
             async move {
                 if duplicate_titles.contains(&title_key(&m.title)) {
@@ -180,14 +181,19 @@ pub async fn enrich_duplicate_titles_with_accounts(matches: Vec<Match>) -> Resul
                         None => fallback_duplicate_label(&m),
                     };
                 }
-                Ok(m)
+                Ok::<_, anyhow::Error>((index, m))
             }
         })
-        .buffered(MAX_CONCURRENT)
-        .collect::<Vec<Result<Match>>>()
-        .await
-        .into_iter()
-        .collect()
+        .buffer_unordered(MAX_CONCURRENT);
+
+    // Results arrive in completion order. The first error (a session
+    // problem) is returned at once; dropping `lookups` kills the others.
+    let mut labelled = Vec::with_capacity(count);
+    while let Some(result) = lookups.next().await {
+        labelled.push(result?);
+    }
+    labelled.sort_by_key(|(index, _)| *index);
+    Ok(labelled.into_iter().map(|(_, m)| m).collect())
 }
 
 fn fallback_duplicate_label(item: &Match) -> Option<String> {

@@ -241,3 +241,68 @@ fn an_item_title_in_an_error_cannot_send_terminal_escapes() {
     assert!(!err.contains('\u{1b}'), "{err:?}");
     assert!(err.contains("github \\u{1b}]0;pwned"), "{err:?}");
 }
+
+#[test]
+fn a_session_problem_while_labelling_is_reported_without_waiting_for_slow_lookups() {
+    let mut h = personal_vault();
+    h.vault("Work", "share-work").login(
+        "share-work",
+        Login {
+            id: "item-github-work",
+            ..GITHUB
+        },
+    );
+    h.slow_item("item-github", 10);
+    h.fail_item("item-github-work", LOCKED);
+
+    let started = std::time::Instant::now();
+    let out = h.run(&["github", "-p"]);
+    let took = started.elapsed();
+
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("pass-cli session unlock"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        took < std::time::Duration::from_secs(5),
+        "waited {took:?} for a slow lookup"
+    );
+}
+
+#[test]
+fn a_cancelled_keyring_prompt_is_explained() {
+    let h = personal_vault();
+    // pass-cli prints this without an "Error:" prefix and exits 1.
+    h.fail(
+        "vault-list",
+        "Please authorize access to the system keyring\n",
+    );
+
+    let out = h.run(&["github", "-p"]);
+
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("keyring"), "{err}");
+    assert!(!err.contains("no error message"), "{err}");
+}
+
+#[test]
+fn a_forced_logout_is_reported_as_an_ended_session() {
+    for stderr_text in [
+        "Error: Local encryption key not found but local data exists. Forcing logout for security.\n\
+         Run 'pass-cli login' to authenticate again.\n",
+        "PROTON_PASS_ENVIRONMENT has switched! Logging you out. Please log back in again\n",
+    ] {
+        let h = personal_vault();
+        h.fail("vault-list", stderr_text);
+
+        let out = h.run(&["github", "-p"]);
+
+        assert!(!out.status.success());
+        let err = stderr(&out);
+        assert!(err.contains("session has ended"), "{stderr_text}: {err}");
+        assert!(err.contains("pass-cli login"), "{stderr_text}: {err}");
+    }
+}

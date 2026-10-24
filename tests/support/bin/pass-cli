@@ -88,6 +88,14 @@ item-view)
     done
     [ -n "$share" ] || unsupported "item view without --share-id"
     [ -n "$item" ] || unsupported "item view without --item-id"
+    # delay/item-view.<item-id> slows, fail/item-view.<item-id> fails one item.
+    if [ -f "$dir/delay/item-view.$item" ]; then
+        sleep "$(cat "$dir/delay/item-view.$item")"
+    fi
+    if [ -f "$dir/fail/item-view.$item" ]; then
+        cat "$dir/fail/item-view.$item" >&2
+        exit 1
+    fi
     # Items live under their vault's share: a wrong share finds nothing, as
     # with the real pass-cli.
     if [ ! -f "$dir/views/$share/$item.json" ]; then
