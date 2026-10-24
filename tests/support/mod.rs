@@ -243,7 +243,10 @@ impl Harness {
         (0..)
             .map_while(|n| {
                 let text = fs::read_to_string(dir.join(format!("{n}.txt"))).ok()?;
-                let args = fs::read_to_string(dir.join(format!("{n}.args"))).unwrap_or_default();
+                // The fake writes the arguments before the text, so a copy
+                // without them means the fake itself is broken.
+                let args = fs::read_to_string(dir.join(format!("{n}.args")))
+                    .expect("clipboard argument log missing");
                 Some((text, args))
             })
             .collect()
