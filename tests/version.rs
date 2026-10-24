@@ -2,6 +2,8 @@
 
 mod support;
 
+use std::time::{Duration, Instant};
+
 use support::{Harness, Login, stderr, stdout};
 
 const GITHUB: Login = Login {
@@ -80,4 +82,35 @@ fn the_version_is_checked_only_when_vaults_are_fetched_fresh() {
     assert!(h.run(&["github", "-p"]).status.success());
 
     assert!(h.calls().iter().all(|c| c[0] != "--version"));
+}
+
+// stderr of pass-cli 2.5.1 when the session lock is engaged.
+const LOCKED: &str = "Session is locked. Please unlock your session and try again.\n\
+Error: Error listing vaults\n\nCaused by:\n    Could not perform operation. Reason: SessionLocked\n";
+
+#[test]
+fn a_stalled_version_check_does_not_hold_up_the_search() {
+    let h = harness();
+    h.slow_version(30);
+
+    let started = Instant::now();
+    let out = h.run(&["github", "-p"]);
+
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "Username: octocat\nPassword: github-secret\n");
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn a_stalled_version_check_does_not_hold_up_a_vault_error() {
+    let h = harness();
+    h.slow_version(30);
+    h.fail("vault-list", LOCKED);
+
+    let started = Instant::now();
+    let out = h.run(&["github", "-p"]);
+
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("locked"), "{}", stderr(&out));
+    assert!(started.elapsed() < Duration::from_secs(5));
 }

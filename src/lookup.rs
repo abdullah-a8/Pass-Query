@@ -8,6 +8,8 @@
 use anyhow::Result;
 use colored::Colorize;
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
+use tokio::time::timeout;
 
 use crate::cache;
 use crate::models::VaultList;
@@ -15,6 +17,10 @@ use crate::pass_cli::{self, ItemUnavailable};
 use crate::search::{self, CacheUse};
 use crate::selection;
 use crate::text::printable;
+
+/// How long the pass-cli version check may still run once the vault list is in.
+/// `pass-cli --version` is local and normally done before the network fetch.
+const VERSION_CHECK_GRACE: Duration = Duration::from_secs(1);
 
 pub struct Credentials {
     pub username: Option<String>,
@@ -121,11 +127,15 @@ async fn load_vaults(use_cache: bool) -> Result<(VaultList, bool)> {
     if use_cache && let Some(cached) = cache::get_cached_vault_list() {
         return Ok((cached, true));
     }
-    // The version check runs alongside the fetch, so it adds no wait.
-    let (warning, vaults) = tokio::join!(pass_cli::version_warning(), pass_cli::fetch_vaults());
-    if let Some(warning) = warning {
+    // The version check runs alongside the fetch. It is only a warning, so
+    // once the fetch is done it gets a short grace period and is then dropped,
+    // which kills a pass-cli that never answers.
+    let mut version_check = tokio::spawn(pass_cli::version_warning());
+    let vaults = pass_cli::fetch_vaults().await;
+    if let Ok(Ok(Some(warning))) = timeout(VERSION_CHECK_GRACE, &mut version_check).await {
         eprintln!("{warning}");
     }
+    version_check.abort();
     let vaults = vaults?;
     // The cache only saves time; failing to write it must not stop the search.
     let _ = cache::set_cached_vault_list(&vaults);
