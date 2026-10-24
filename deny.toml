@@ -10,8 +10,12 @@ targets = [
 ]
 
 [advisories]
-# Every RustSec advisory (vulnerability, unsoundness, unmaintained) fails
-# the check; yanked crates do too.
+# Every RustSec advisory fails the check, in any crate of the graph:
+# vulnerabilities always do, and the scopes below are set to "all" because
+# cargo-deny 0.20 checks unsoundness only in direct dependencies by default.
+# Yanked crates fail too.
+unmaintained = "all"
+unsound = "all"
 yanked = "deny"
 ignore = []
 
