@@ -11,6 +11,7 @@ mod models;
 mod pass_cli;
 mod search;
 mod selection;
+mod text;
 
 /// Fast Proton Pass password search with intelligent caching
 #[derive(Parser)]
