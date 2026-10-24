@@ -16,6 +16,8 @@ use tempfile::TempDir;
 const FAKE_PASS_CLI: &str = include_str!("bin/pass-cli");
 const FAKE_FZF: &str = include_str!("bin/fzf");
 const FAKE_CLIPBOARD: &str = include_str!("bin/clipboard");
+/// The external commands the fake tools run.
+const FAKE_UTILS: [&str; 6] = ["cat", "find", "mkdir", "sed", "tr", "wc"];
 
 #[derive(Clone)]
 pub struct Login {
@@ -54,9 +56,15 @@ impl Harness {
             vaults: Vec::new(),
             items: Vec::new(),
         };
-        for dir in [harness.bin_dir(), harness.fake_dir(), harness.home_dir()] {
+        for dir in [
+            harness.bin_dir(),
+            harness.utils_dir(),
+            harness.fake_dir(),
+            harness.home_dir(),
+        ] {
             fs::create_dir_all(dir).expect("create harness dir");
         }
+        harness.link_utils();
         harness.install("pass-cli", FAKE_PASS_CLI);
         harness.install("fzf", FAKE_FZF);
         harness.install("wl-copy", FAKE_CLIPBOARD);
@@ -186,7 +194,9 @@ impl Harness {
 
     fn write_scenario(&self) {
         let fake = self.fake_dir();
+        // Rebuilt on every run, so nothing from an earlier run lingers.
         for dir in ["items", "views", "fields"] {
+            let _ = fs::remove_dir_all(fake.join(dir));
             fs::create_dir_all(fake.join(dir)).unwrap();
         }
 
@@ -221,12 +231,13 @@ impl Harness {
             );
         }
 
+        // Items are stored under their vault's share ID, so a view with the
+        // wrong share finds nothing.
         for item in &self.items {
-            write_json(
-                &fake.join("views").join(format!("{}.json", item.id)),
-                &view(item),
-            );
-            let fields = fake.join("fields").join(item.id);
+            let views = fake.join("views").join(item.share_id);
+            fs::create_dir_all(&views).unwrap();
+            write_json(&views.join(format!("{}.json", item.id)), &view(item));
+            let fields = fake.join("fields").join(item.share_id).join(item.id);
             fs::create_dir_all(&fields).unwrap();
             if let Content::Login(login) = &item.content {
                 // pass-cli prints the value followed by a newline and omits empty fields.
@@ -253,8 +264,29 @@ impl Harness {
         }
     }
 
+    /// Only the fakes and the few utilities they need are on PATH, so pq can
+    /// never reach a real pass-cli, fzf or clipboard tool on the host.
     fn path_var(&self) -> String {
-        format!("{}:/usr/bin:/bin", self.bin_dir().display())
+        format!(
+            "{}:{}",
+            self.bin_dir().display(),
+            self.utils_dir().display()
+        )
+    }
+
+    fn link_utils(&self) {
+        for util in FAKE_UTILS {
+            let target = ["/usr/bin", "/bin"]
+                .iter()
+                .map(|dir| Path::new(dir).join(util))
+                .find(|path| path.exists())
+                .unwrap_or_else(|| panic!("{util} not found in /usr/bin or /bin"));
+            std::os::unix::fs::symlink(target, self.utils_dir().join(util)).unwrap();
+        }
+    }
+
+    fn utils_dir(&self) -> PathBuf {
+        self.root.path().join("utils")
     }
 
     fn bin_dir(&self) -> PathBuf {
