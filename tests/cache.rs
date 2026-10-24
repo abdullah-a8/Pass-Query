@@ -48,7 +48,11 @@ fn now() -> u64 {
 
 /// A current-format cache of the Personal vault holding only `github`, written `age` seconds ago.
 fn cache_of_github(age: u64) -> String {
-    let ts = now() - age;
+    cache_of_github_at(now() - age)
+}
+
+/// The same cache, written at `ts`.
+fn cache_of_github_at(ts: u64) -> String {
     serde_json::json!({
         "version": 3,
         "vault_list": { "vaults": { "vaults": [{ "name": "Personal", "share_id": "share-personal" }] }, "timestamp": ts },
@@ -89,7 +93,7 @@ fn a_cache_older_than_a_day_is_refetched() {
 fn a_cache_timestamp_in_the_future_is_not_trusted() {
     for future in [now() + 10 * HOUR, u64::MAX] {
         let h = personal_vault();
-        h.write_cache(&cache_of_github(0).replace(&now().to_string(), &future.to_string()));
+        h.write_cache(&cache_of_github_at(future));
 
         let out = h.run(&["github", "-p"]);
 
