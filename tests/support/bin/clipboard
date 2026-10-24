@@ -1,12 +1,47 @@
 #!/bin/sh
-# Fake clipboard tool, installed as wl-copy and pbcopy. Each copy is stored
-# as clipboard/<n>.txt (n counts from 0) with its arguments in
-# clipboard/<n>.args, so tests can check order, content and that no secret
-# was passed on the command line.
+# Fake clipboard tools, installed as wl-copy, wl-paste, xclip, xsel, pbcopy
+# and pbpaste. They share one simulated clipboard, $PQ_FAKE_DIR/clipboard-now.
+# Each copy is also stored as clipboard/<n>.txt (n counts from 0), with the
+# tool's name in clipboard/<n>.tool and its arguments in clipboard/<n>.args,
+# so tests can check order, content, the tool used, and that no secret was
+# passed on a command line. Only the invocations pq is expected to make are
+# accepted.
 set -u
 dir=${PQ_FAKE_DIR:?PQ_FAKE_DIR is not set}
+tool=${0##*/}
+now="$dir/clipboard-now"
+args="$*"
 
-mkdir -p "$dir/clipboard"
-n=$(find "$dir/clipboard" -name '*.txt' | wc -l | tr -d ' ')
-for arg in "$@"; do printf '%s\t' "$arg"; done >"$dir/clipboard/$n.args"
-cat >"$dir/clipboard/$n.txt"
+copy() {
+    mkdir -p "$dir/clipboard"
+    n=$(find "$dir/clipboard" -name '*.txt' | wc -l | tr -d ' ')
+    printf '%s' "$tool" >"$dir/clipboard/$n.tool"
+    printf '%s' "$args" >"$dir/clipboard/$n.args"
+    cat >"$dir/clipboard/$n.txt"
+    cp "$dir/clipboard/$n.txt" "$now"
+}
+
+paste() {
+    cat "$now" 2>/dev/null || true
+}
+
+clear() {
+    : >"$now"
+}
+
+case "$tool $args" in
+"wl-copy ") copy ;;
+"wl-copy --clear") clear ;;
+"wl-paste --no-newline") paste ;;
+"xclip -selection clipboard") copy ;;
+"xclip -selection clipboard -o") paste ;;
+"xsel --clipboard --input") copy ;;
+"xsel --clipboard --output") paste ;;
+"xsel --clipboard --clear") clear ;;
+"pbcopy ") copy ;;
+"pbpaste ") paste ;;
+*)
+    echo "fake clipboard: unsupported invocation: $tool $args" >&2
+    exit 2
+    ;;
+esac

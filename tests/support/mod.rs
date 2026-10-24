@@ -17,7 +17,25 @@ const FAKE_PASS_CLI: &str = include_str!("bin/pass-cli");
 const FAKE_FZF: &str = include_str!("bin/fzf");
 const FAKE_CLIPBOARD: &str = include_str!("bin/clipboard");
 /// The external commands the fake tools run.
-const FAKE_UTILS: [&str; 7] = ["cat", "find", "mkdir", "sed", "sleep", "tr", "wc"];
+const FAKE_UTILS: [&str; 8] = ["cat", "cp", "find", "mkdir", "sed", "sleep", "tr", "wc"];
+const CLIPBOARD_TOOLS: [&str; 6] = ["wl-copy", "wl-paste", "xclip", "xsel", "pbcopy", "pbpaste"];
+
+/// The display server pq sees, through WAYLAND_DISPLAY and DISPLAY. macOS
+/// builds ignore it and always use pbcopy.
+#[derive(Clone, Copy)]
+pub enum Display {
+    Wayland,
+    X11,
+    None,
+}
+
+/// One clipboard write by a (fake) clipboard tool.
+#[derive(Debug)]
+pub struct Copy {
+    pub text: String,
+    pub tool: String,
+    pub args: String,
+}
 
 #[derive(Clone)]
 pub struct Login {
@@ -48,6 +66,7 @@ pub struct Harness {
     vaults: Vec<(&'static str, &'static str)>,
     items: Vec<Item>,
     extra_env: Vec<(&'static str, &'static str)>,
+    display: Display,
 }
 
 impl Harness {
@@ -58,6 +77,7 @@ impl Harness {
             vaults: Vec::new(),
             items: Vec::new(),
             extra_env: Vec::new(),
+            display: Display::Wayland,
         };
         for dir in [
             harness.bin_dir(),
@@ -70,8 +90,9 @@ impl Harness {
         harness.link_utils();
         harness.install("pass-cli", FAKE_PASS_CLI);
         harness.install("fzf", FAKE_FZF);
-        harness.install("wl-copy", FAKE_CLIPBOARD);
-        harness.install("pbcopy", FAKE_CLIPBOARD);
+        for tool in CLIPBOARD_TOOLS {
+            harness.install(tool, FAKE_CLIPBOARD);
+        }
         harness
     }
 
@@ -88,6 +109,11 @@ impl Harness {
             .lines()
             .map(str::to_string)
             .collect()
+    }
+
+    pub fn display(&mut self, display: Display) -> &mut Self {
+        self.display = display;
+        self
     }
 
     pub fn vault(&mut self, name: &'static str, share_id: &'static str) -> &mut Self {
@@ -224,10 +250,36 @@ impl Harness {
     /// leaks: no username, email or password may appear on stderr or in the
     /// arguments of any process pq started (pass-cli, fzf, clipboard).
     pub fn run(&self, args: &[&str]) -> Output {
+        let output = self
+            .command(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run pq");
+        self.assert_no_leaks(&output);
+        output
+    }
+
+    /// Start pq with `args` and a stdin the test writes to, for the prompts.
+    pub fn spawn(&self, args: &[&str]) -> Running<'_> {
+        let child = self
+            .command(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start pq");
+        Running {
+            harness: self,
+            child,
+        }
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
         self.write_scenario();
         // A permissive umask, so the cache's 0600 mode is pq's doing and not
         // inherited from the developer's shell.
-        let output = Command::new("/bin/sh")
+        let mut command = Command::new("/bin/sh");
+        command
             .arg("-c")
             .arg(r#"umask 022 && exec "$0" "$@""#)
             .arg(env!("CARGO_BIN_EXE_pq"))
@@ -238,12 +290,13 @@ impl Harness {
             .env("XDG_CACHE_HOME", self.cache_dir())
             .env("PQ_FAKE_DIR", self.fake_dir())
             .env("NO_COLOR", "1")
-            .envs(self.extra_env.iter().copied())
-            .stdin(Stdio::null())
-            .output()
-            .expect("run pq");
-        self.assert_no_leaks(&output);
-        output
+            .envs(self.extra_env.iter().copied());
+        match self.display {
+            Display::Wayland => command.env("WAYLAND_DISPLAY", "wayland-0"),
+            Display::X11 => command.env("DISPLAY", ":0"),
+            Display::None => &mut command,
+        };
+        command
     }
 
     /// The argument logs of every fake tool, as raw bytes: neither split into
@@ -332,17 +385,20 @@ impl Harness {
         }
     }
 
-    /// Everything copied to the clipboard, in order, with the arguments of each copy.
-    pub fn copies(&self) -> Vec<(String, String)> {
+    /// Everything copied to the clipboard, in order.
+    pub fn copies(&self) -> Vec<Copy> {
         let dir = self.fake_dir().join("clipboard");
+        let read = |n: usize, ext: &str| fs::read_to_string(dir.join(format!("{n}.{ext}")));
         (0..)
             .map_while(|n| {
-                let text = fs::read_to_string(dir.join(format!("{n}.txt"))).ok()?;
-                // The fake writes the arguments before the text, so a copy
-                // without them means the fake itself is broken.
-                let args = fs::read_to_string(dir.join(format!("{n}.args")))
-                    .expect("clipboard argument log missing");
-                Some((text, args))
+                let text = read(n, "txt").ok()?;
+                // The fake writes the tool and arguments before the text, so
+                // a copy without them means the fake itself is broken.
+                Some(Copy {
+                    text,
+                    tool: read(n, "tool").expect("clipboard tool log missing"),
+                    args: read(n, "args").expect("clipboard argument log missing"),
+                })
             })
             .collect()
     }
@@ -352,6 +408,21 @@ impl Harness {
         fs::read_to_string(self.fake_dir().join("fzf-args"))
             .map(|log| log.lines().count())
             .unwrap_or(0)
+    }
+
+    /// The texts copied to the clipboard, in order.
+    pub fn copied_texts(&self) -> Vec<String> {
+        self.copies().into_iter().map(|copy| copy.text).collect()
+    }
+
+    /// What the simulated clipboard holds now.
+    pub fn clipboard_now(&self) -> String {
+        fs::read_to_string(self.fake_dir().join("clipboard-now")).unwrap_or_default()
+    }
+
+    /// Replace the clipboard's contents, as another application would.
+    pub fn set_clipboard(&self, text: &str) {
+        fs::write(self.fake_dir().join("clipboard-now"), text).unwrap();
     }
 
     /// The arguments of the last fzf invocation, tab-separated.
@@ -518,6 +589,47 @@ impl Harness {
 
     fn cache_dir(&self) -> PathBuf {
         self.root.path().join("cache")
+    }
+}
+
+/// A pq process started by `Harness::spawn`.
+pub struct Running<'a> {
+    harness: &'a Harness,
+    child: std::process::Child,
+}
+
+impl Running<'_> {
+    /// Press Enter at pq's prompt.
+    pub fn press_enter(&mut self) {
+        use std::io::Write;
+        let stdin = self.child.stdin.as_mut().expect("piped stdin");
+        stdin.write_all(b"\n").unwrap();
+        stdin.flush().unwrap();
+    }
+
+    pub fn is_running(&mut self) -> bool {
+        self.child.try_wait().unwrap().is_none()
+    }
+
+    /// Wait for pq to exit and return its output, checked for leaks.
+    pub fn finish(self) -> Output {
+        let output = self.child.wait_with_output().expect("wait for pq");
+        self.harness.assert_no_leaks(&output);
+        output
+    }
+}
+
+/// Poll `condition` every 50 ms until it holds or `timeout` passes.
+pub fn eventually(timeout: std::time::Duration, mut condition: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if condition() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
 
