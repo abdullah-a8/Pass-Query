@@ -199,3 +199,22 @@ fn the_retry_reuses_item_lists_fetched_in_the_same_run() {
     assert_eq!(h.calls_to("vault list").len(), 1);
     assert_eq!(h.calls_to("item list").len(), 2);
 }
+
+#[test]
+fn an_empty_cached_vault_list_is_checked_again_before_saying_there_are_no_vaults() {
+    let h = personal_vault();
+    h.write_cache(
+        &serde_json::json!({
+            "version": 2,
+            "vault_list": { "vaults": { "vaults": [] }, "timestamp": now() },
+            "vaults": []
+        })
+        .to_string(),
+    );
+
+    let out = h.run(&["github", "-p"]);
+
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(h.calls_to("vault list").len(), 1);
+    assert_eq!(stdout(&out), "Username: octocat\nPassword: github-secret\n");
+}
