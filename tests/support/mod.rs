@@ -223,6 +223,12 @@ impl Harness {
         fs::write(dir.join("version"), seconds.to_string()).unwrap();
     }
 
+    /// What pass-cli, started by pq, could see of pq's process: its core
+    /// file size limit and whether pq's /proc entries were readable.
+    pub fn process_probe(&self) -> String {
+        fs::read_to_string(self.fake_dir().join("probe")).unwrap_or_default()
+    }
+
     /// Choose the 1-based picker line fzf returns.
     pub fn pick(&self, line: usize) {
         fs::write(self.fake_dir().join("fzf-pick"), line.to_string()).unwrap();
@@ -277,11 +283,12 @@ impl Harness {
     fn command(&self, args: &[&str]) -> Command {
         self.write_scenario();
         // A permissive umask, so the cache's 0600 mode is pq's doing and not
-        // inherited from the developer's shell.
+        // inherited from the developer's shell; and core dumps allowed as far
+        // as the system lets them be, so turning them off is pq's doing too.
         let mut command = Command::new("/bin/sh");
         command
             .arg("-c")
-            .arg(r#"umask 022 && exec "$0" "$@""#)
+            .arg(r#"umask 022 && { ulimit -c "$(ulimit -H -c)" 2>/dev/null || true; } && exec "$0" "$@""#)
             .arg(env!("CARGO_BIN_EXE_pq"))
             .args(args)
             .env_clear()
@@ -500,10 +507,18 @@ impl Harness {
         cache
     }
 
+    /// Write the cache file as pq would: 0600, in a 0700 directory.
     pub fn write_cache(&self, contents: &str) {
         let path = self.cache_file();
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, contents).unwrap();
+        let dir = path.parent().unwrap();
+        fs::create_dir_all(dir).unwrap();
+        fs::write(&path, contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
     }
 
     pub fn cache_file(&self) -> PathBuf {

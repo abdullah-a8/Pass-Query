@@ -9,6 +9,7 @@ mod clipboard;
 mod lookup;
 mod models;
 mod pass_cli;
+mod process;
 mod search;
 mod selection;
 mod text;
@@ -54,6 +55,8 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
+    // First, before any secret is in memory, in pq and in the clear helper.
+    process::protect_memory();
     let mut args = std::env::args();
     if args.nth(1).as_deref() == Some(clipboard::CLEAR_HELPER_ARG) {
         return clipboard::run_clear_helper(args);

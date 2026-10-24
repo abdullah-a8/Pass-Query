@@ -427,6 +427,7 @@ dependencies = [
  "colored",
  "futures",
  "indicatif",
+ "libc",
  "serde",
  "serde_json",
  "sha2",
