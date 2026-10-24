@@ -1,13 +1,64 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
+use std::fmt;
 use tokio::process::Command;
 
 use crate::models::{ItemList, ItemView, Match, Vault, VaultList};
 
-/// Heuristic: does pass-cli stderr indicate the user simply isn't logged in?
-fn is_auth_error(stderr: &str) -> bool {
-    let s = stderr.to_lowercase();
-    s.contains("authenticated") || s.contains("no session") || s.contains("not logged in")
+/// A pass-cli failure the user fixes by acting on their Proton Pass session,
+/// recognised from pass-cli's stderr. It is returned as the error itself, so
+/// callers can tell it apart from other failures with `downcast_ref`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionProblem {
+    /// The session lock (pass-cli 2.2+) is engaged.
+    Locked,
+    /// Proton ended the session; pass-cli has logged out.
+    Invalidated,
+    NotLoggedIn,
+}
+
+impl SessionProblem {
+    fn from_stderr(stderr: &str) -> Option<Self> {
+        let s = stderr.to_lowercase();
+        if s.contains("session is locked") || s.contains("sessionlocked") {
+            Some(Self::Locked)
+        } else if s.contains("session has been invalidated") {
+            Some(Self::Invalidated)
+        } else if s.contains("requires an authenticated client")
+            || s.contains("no session")
+            || s.contains("not logged in")
+        {
+            Some(Self::NotLoggedIn)
+        } else {
+            None
+        }
+    }
+}
+
+impl fmt::Display for SessionProblem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (problem, hint) = match self {
+            Self::Locked => (
+                "Your Proton Pass session is locked.",
+                "pass-cli session unlock",
+            ),
+            Self::Invalidated => ("Your Proton Pass session has ended.", "pass-cli login"),
+            Self::NotLoggedIn => ("Not logged in to Proton Pass.", "pass-cli login"),
+        };
+        write!(f, "{} {problem} Run: {}", "✗".red(), hint.bold())
+    }
+}
+
+impl std::error::Error for SessionProblem {}
+
+/// The error for a failed pass-cli call: its session problem when stderr
+/// shows one, otherwise `what` with pass-cli's own message.
+fn failure(what: &str, stderr: &[u8]) -> anyhow::Error {
+    let stderr = String::from_utf8_lossy(stderr);
+    match SessionProblem::from_stderr(&stderr) {
+        Some(problem) => anyhow::Error::new(problem),
+        None => anyhow::anyhow!("{what} failed: {}", stderr.trim_end()),
+    }
 }
 
 /// Fetch all vaults using `pass-cli vault list --output json`
@@ -28,15 +79,7 @@ pub async fn fetch_vaults() -> Result<VaultList> {
         })?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if is_auth_error(&stderr) {
-            anyhow::bail!(
-                "{} Not logged in to Proton Pass. Run: {}",
-                "✗".red(),
-                "pass-cli login".bold()
-            );
-        }
-        anyhow::bail!("pass-cli vault list failed: {}", stderr);
+        return Err(failure("pass-cli vault list", &output.stderr));
     }
 
     let stdout = String::from_utf8(output.stdout).context("Invalid UTF-8 in pass-cli output")?;
@@ -78,8 +121,10 @@ pub async fn list_vault_items(vault: &Vault, login_only: bool) -> Result<ItemLis
         ))?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("pass-cli item list failed for '{}': {}", vault.name, stderr);
+        return Err(failure(
+            &format!("pass-cli item list for '{}'", vault.name),
+            &output.stderr,
+        ));
     }
 
     let stdout =
@@ -162,8 +207,10 @@ pub async fn get_item_credentials(item: &Match) -> Result<(Option<String>, Strin
         ))?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Failed to get item: {}", stderr);
+        return Err(failure(
+            &format!("pass-cli item view for '{}'", item.title),
+            &output.stderr,
+        ));
     }
 
     let stdout = String::from_utf8(output.stdout).context("Invalid UTF-8 in item view output")?;
@@ -205,12 +252,47 @@ mod tests {
     }
 
     #[test]
-    fn detects_authentication_errors() {
-        assert!(is_auth_error(
-            "Error: This operation requires an authenticated client"
-        ));
-        assert!(is_auth_error("Command is not logout there is no session"));
-        assert!(!is_auth_error("failed to connect to host: timed out"));
+    fn recognises_session_problems_in_pass_cli_stderr() {
+        let cases = [
+            (
+                "Session is locked. Please unlock your session and try again.\nError: Error listing vaults",
+                Some(SessionProblem::Locked),
+            ),
+            (
+                "Error: Could not perform operation. Reason: SessionLocked",
+                Some(SessionProblem::Locked),
+            ),
+            (
+                "Your session has been invalidated and you have been logged out automatically.",
+                Some(SessionProblem::Invalidated),
+            ),
+            (
+                "Error: This operation requires an authenticated client",
+                Some(SessionProblem::NotLoggedIn),
+            ),
+            (
+                "Command is not logout there is no session",
+                Some(SessionProblem::NotLoggedIn),
+            ),
+            ("failed to connect to host: timed out", None),
+            ("Error: Could not perform operation. Reason: NotFound", None),
+        ];
+        for (stderr, expected) in cases {
+            assert_eq!(SessionProblem::from_stderr(stderr), expected, "{stderr}");
+        }
+    }
+
+    #[test]
+    fn failure_keeps_session_problems_as_their_own_error() {
+        let err = failure("pass-cli vault list", b"Reason: SessionLocked");
+        assert_eq!(
+            err.downcast_ref::<SessionProblem>(),
+            Some(&SessionProblem::Locked)
+        );
+
+        let err = failure("pass-cli vault list", b"Error: boom\n");
+        assert!(err.downcast_ref::<SessionProblem>().is_none());
+        assert_eq!(err.to_string(), "pass-cli vault list failed: Error: boom");
     }
 
     #[test]

@@ -117,17 +117,36 @@ pub async fn search_all_vaults_limited(
     // Clear progress bar
     pb.finish_and_clear();
 
-    // Collect all matches, filtering out errors
     let mut all_matches = Vec::new();
+    let mut failures = Vec::new();
     for result in results {
         match result {
             Ok(matches) => all_matches.extend(matches),
-            Err(e) => eprintln!(
-                "{} vault search failed: {}",
-                "⚠".yellow(),
-                e.to_string().dimmed()
-            ),
+            Err(e) => failures.push(e),
         }
+    }
+
+    // A session problem affects every vault: report it once, with its fix.
+    if let Some(problem) = failures
+        .iter()
+        .find_map(|e| e.downcast_ref::<pass_cli::SessionProblem>())
+    {
+        return Err(anyhow::Error::new(*problem));
+    }
+    // With no vault searched, "no items found" would be misleading.
+    if !failures.is_empty() && failures.len() as u64 == vault_count {
+        anyhow::bail!(
+            "{} Could not search any vault: {:#}",
+            "✗".red(),
+            failures[0]
+        );
+    }
+    for e in &failures {
+        eprintln!(
+            "{} vault search failed: {}",
+            "⚠".yellow(),
+            e.to_string().dimmed()
+        );
     }
 
     // Deterministic order so the picker is stable across runs.
