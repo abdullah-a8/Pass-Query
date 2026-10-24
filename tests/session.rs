@@ -339,9 +339,11 @@ fn a_trashed_item_title_in_an_error_cannot_send_terminal_escapes() {
 
     let out = h.run(&["github", "-p"]);
 
+    // The refused read triggers one fresh search, whose message names the
+    // item: escaped, like every title pq prints.
     assert!(!out.status.success());
     let err = stderr(&out);
-    assert!(err.contains("in the trash"), "{err}");
+    assert!(err.contains("could not be read"), "{err}");
     assert!(
         !err.contains('\u{1b}') && !err.contains('\u{202e}'),
         "{err:?}"
