@@ -2,7 +2,8 @@
 //! and away from the user's other processes.
 
 /// Protect pq's own memory: on Linux, make pq non-dumpable, so the kernel
-/// writes no core dump of it (to a file or a dump handler) and other
+/// writes no core dump of it (unless fs.suid_dumpable is set to allow
+/// root-only dumps) and other
 /// processes of the same user cannot read its memory through /proc or attach
 /// a debugger; and set the core size limit to zero, which also stops
 /// file-based core dumps on macOS. Programs pq starts (pass-cli, fzf, the
