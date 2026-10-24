@@ -269,9 +269,10 @@ fn the_password_is_cleared_even_if_pq_dies_while_copying_it() {
 #[test]
 fn a_copy_slower_than_the_delay_is_still_cleared() {
     let h = harness();
+    // Checks before the copy lands fall at 2s and 4s, clear of the 3s copy.
     h.slow_copy(3);
 
-    let out = h.run(&["wifi", "--clear-after", "1"]);
+    let out = h.run(&["wifi", "--clear-after", "2"]);
 
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     assert_eq!(h.clipboard_now(), "wifi-secret");
@@ -286,7 +287,7 @@ fn a_copy_that_lands_late_and_hangs_is_still_cleared() {
     let h = harness();
     h.slow_copy(3);
     h.hang_after_copy();
-    let pq = h.spawn(&["wifi", "--clear-after", "1"]);
+    let pq = h.spawn(&["wifi", "--clear-after", "2"]);
     assert!(eventually(6 * SECOND, || h.clipboard_now() == "wifi-secret"));
 
     pq.kill();
