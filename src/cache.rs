@@ -129,11 +129,21 @@ fn ensure_private_dir(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir).context("Failed to create cache directory")?;
     #[cfg(unix)]
     {
-        let meta = fs::symlink_metadata(dir).context("Failed to inspect cache directory")?;
-        if !meta.file_type().is_dir() || !owned_by_user(&meta) {
-            anyhow::bail!("Cache directory is a link or not yours");
+        // Checked and changed through one handle, opened without following a
+        // link, so the path cannot be swapped for a link in between.
+        let handle = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(dir)
+            .context("Cache directory is a link or cannot be opened")?;
+        let meta = handle
+            .metadata()
+            .context("Failed to inspect cache directory")?;
+        if !owned_by_user(&meta) {
+            anyhow::bail!("Cache directory is not yours");
         }
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+        handle
+            .set_permissions(fs::Permissions::from_mode(0o700))
             .context("Failed to restrict cache directory permissions")?;
     }
     Ok(())
