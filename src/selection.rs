@@ -24,10 +24,10 @@ pub fn select_item(matches: Vec<Match>) -> Result<Match> {
                     format!(
                         "{}|{} {} {} {}",
                         i,
-                        format!("[{}]", m.vault_name).dimmed(),
-                        m.title,
+                        format!("[{}]", for_picker(&m.vault_name)).dimmed(),
+                        for_picker(&m.title),
                         "—".dimmed(),
-                        m.picker_detail().dimmed()
+                        for_picker(m.picker_detail()).dimmed()
                     )
                 })
                 .collect::<Vec<_>>()
@@ -72,7 +72,40 @@ pub fn select_item(matches: Vec<Match>) -> Result<Match> {
                 .parse()
                 .context("Failed to parse selection index")?;
 
-            Ok(matches.into_iter().nth(index).unwrap())
+            matches
+                .into_iter()
+                .nth(index)
+                .with_context(|| format!("{} fzf returned an unknown selection", "✗".red()))
         }
+    }
+}
+
+/// A value from Proton Pass as picker text. Titles, vault names and accounts
+/// can be set by anyone who shares a vault with the user, so control
+/// characters are shown escaped: a newline cannot add a picker row (which
+/// would map to another item's index) and an escape sequence cannot redraw
+/// the terminal.
+fn for_picker(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::for_picker;
+
+    #[test]
+    fn control_characters_are_shown_escaped() {
+        assert_eq!(for_picker("bank | savings"), "bank | savings");
+        assert_eq!(for_picker("a\nb\r\tc"), "a\\nb\\r\\tc");
+        assert_eq!(for_picker("x\u{1b}[2Ky"), "x\\u{1b}[2Ky");
+        assert_eq!(for_picker("café ☕"), "café ☕");
     }
 }

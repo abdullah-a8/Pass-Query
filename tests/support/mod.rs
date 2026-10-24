@@ -121,6 +121,11 @@ impl Harness {
         fs::write(self.fake_dir().join("fzf-pick"), line.to_string()).unwrap();
     }
 
+    /// Make fzf print `reply` instead of one of its input lines.
+    pub fn picker_replies(&self, reply: &str) {
+        fs::write(self.fake_dir().join("fzf-reply"), reply).unwrap();
+    }
+
     pub fn cancel_picker(&self) {
         fs::write(self.fake_dir().join("fzf-pick"), "cancel").unwrap();
     }

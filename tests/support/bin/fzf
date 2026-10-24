@@ -11,6 +11,11 @@ record=""
 for arg in "$@"; do record="$record$arg	"; done
 printf '%s\n' "$record" >>"$dir/fzf-args"
 
+# fzf-reply, when present, is printed as-is, to simulate unexpected output.
+if [ -f "$dir/fzf-reply" ]; then
+    cat "$dir/fzf-reply"
+    exit 0
+fi
 pick=$(cat "$dir/fzf-pick" 2>/dev/null || echo 1)
 if [ "$pick" = cancel ]; then
     exit 130
