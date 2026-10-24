@@ -4,6 +4,7 @@ use std::fmt;
 use tokio::process::Command;
 
 use crate::models::{ItemList, ItemView, Match, Vault, VaultList};
+use crate::text::printable;
 
 /// A pass-cli failure the user fixes by acting on their Proton Pass session,
 /// recognised from pass-cli's stderr. It is returned as the error itself, so
@@ -54,19 +55,58 @@ impl fmt::Display for SessionProblem {
 
 impl std::error::Error for SessionProblem {}
 
+/// A `pass-cli` command with its logging off and killed if dropped. With
+/// MUON_LOG_LEVEL or PASS_LOG_LEVEL set in the user's environment, pass-cli
+/// logs whole HTTP requests, bearer tokens included, to stderr. A dropped
+/// command (a search abandoned on a session problem) must not keep running.
+fn pass_cli_command() -> Command {
+    let mut command = Command::new("pass-cli");
+    command
+        .env("MUON_LOG_LEVEL", "off")
+        .env("PASS_LOG_LEVEL", "off")
+        .kill_on_drop(true);
+    command
+}
+
 /// The error for a failed pass-cli call: its session problem when stderr
-/// shows one, otherwise `what` with pass-cli's own message.
+/// shows one, otherwise `what` with a summary of pass-cli's message.
 fn failure(what: &str, stderr: &[u8]) -> anyhow::Error {
     let stderr = String::from_utf8_lossy(stderr);
     match SessionProblem::from_stderr(&stderr) {
         Some(problem) => anyhow::Error::new(problem),
-        None => anyhow::anyhow!("{what} failed: {}", stderr.trim_end()),
+        None => anyhow::anyhow!("{what} failed: {}", summarize(&stderr)),
     }
+}
+
+/// What pq shows of a failed call's stderr: pass-cli's top-level error
+/// message and the Proton error code, escaped and shortened. Never the raw
+/// text, which can hold log lines with tokens or response bodies.
+fn summarize(stderr: &str) -> String {
+    const MAX_CHARS: usize = 200;
+    let message = stderr
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Error: "))
+        .map(str::trim);
+    let reason = stderr.rfind("Reason: ").map(|start| {
+        stderr[start + "Reason: ".len()..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect::<String>()
+    });
+    let summary = match (message, reason.filter(|r| !r.is_empty())) {
+        (Some(message), Some(reason)) if !message.contains(&reason) => {
+            format!("{message} ({reason})")
+        }
+        (Some(message), _) => message.to_string(),
+        (None, Some(reason)) => format!("Reason: {reason}"),
+        (None, None) => "pass-cli reported no error message".to_string(),
+    };
+    printable(&summary).chars().take(MAX_CHARS).collect()
 }
 
 /// Fetch all vaults using `pass-cli vault list --output json`
 pub async fn fetch_vaults() -> Result<VaultList> {
-    let output = Command::new("pass-cli")
+    let output = pass_cli_command()
         .args(["vault", "list", "--output", "json"])
         .output()
         .await
@@ -114,10 +154,8 @@ pub async fn list_vault_items(vault: &Vault, login_only: bool) -> Result<ItemLis
         args.push(vault.name.clone());
     }
 
-    // Killed if the search is abandoned (e.g. on a session problem elsewhere).
-    let output = Command::new("pass-cli")
+    let output = pass_cli_command()
         .args(args)
-        .kill_on_drop(true)
         .output()
         .await
         .context(format!(
@@ -183,9 +221,8 @@ async fn view_single_field(item: &Match, field: &str) -> Result<Option<String>> 
     let mut args = item_view_args(item);
     args.extend(["--field".to_string(), field.to_string()]);
 
-    let output = Command::new("pass-cli")
+    let output = pass_cli_command()
         .args(args)
-        .kill_on_drop(true)
         .output()
         .await
         .context("Failed to execute pass-cli item view")?;
@@ -208,7 +245,7 @@ pub async fn get_item_credentials(item: &Match) -> Result<(Option<String>, Strin
     let mut args = item_view_args(item);
     args.extend(["--output".to_string(), "json".to_string()]);
 
-    let output = Command::new("pass-cli")
+    let output = pass_cli_command()
         .args(args)
         .output()
         .await
@@ -219,7 +256,7 @@ pub async fn get_item_credentials(item: &Match) -> Result<(Option<String>, Strin
 
     if !output.status.success() {
         return Err(failure(
-            &format!("pass-cli item view for '{}'", item.title),
+            &format!("pass-cli item view for '{}'", printable(&item.title)),
             &output.stderr,
         ));
     }
@@ -316,7 +353,22 @@ mod tests {
 
         let err = failure("pass-cli vault list", b"Error: boom\n");
         assert!(err.downcast_ref::<SessionProblem>().is_none());
-        assert_eq!(err.to_string(), "pass-cli vault list failed: Error: boom");
+        assert_eq!(err.to_string(), "pass-cli vault list failed: boom");
+    }
+
+    #[test]
+    fn stderr_is_summarised_to_the_error_and_its_reason() {
+        let stderr = "DEBUG muon: Authorization: Bearer tok\n\
+            Error: Error listing items\n\nCaused by:\n    0: Error fetching items\n    \
+            1: Could not perform operation. Reason: NotFound\n";
+        assert_eq!(summarize(stderr), "Error listing items (NotFound)");
+        assert_eq!(summarize("Reason: NotFound"), "Reason: NotFound");
+        assert_eq!(
+            summarize("thread panicked"),
+            "pass-cli reported no error message"
+        );
+        assert_eq!(summarize("Error: a\u{1b}[2Kb"), "a\\u{1b}[2Kb");
+        assert_eq!(summarize(&format!("Error: {}", "x".repeat(500))).len(), 200);
     }
 
     #[test]

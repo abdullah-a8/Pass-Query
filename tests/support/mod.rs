@@ -47,6 +47,7 @@ pub struct Harness {
     root: TempDir,
     vaults: Vec<(&'static str, &'static str)>,
     items: Vec<Item>,
+    extra_env: Vec<(&'static str, &'static str)>,
 }
 
 impl Harness {
@@ -56,6 +57,7 @@ impl Harness {
             root,
             vaults: Vec::new(),
             items: Vec::new(),
+            extra_env: Vec::new(),
         };
         for dir in [
             harness.bin_dir(),
@@ -71,6 +73,21 @@ impl Harness {
         harness.install("wl-copy", FAKE_CLIPBOARD);
         harness.install("pbcopy", FAKE_CLIPBOARD);
         harness
+    }
+
+    /// Set an environment variable for pq (and so for everything it starts).
+    pub fn env(&mut self, key: &'static str, value: &'static str) -> &mut Self {
+        self.extra_env.push((key, value));
+        self
+    }
+
+    /// The (MUON_LOG_LEVEL, PASS_LOG_LEVEL) each pass-cli call was started with.
+    pub fn pass_cli_log_levels(&self) -> Vec<String> {
+        fs::read_to_string(self.fake_dir().join("log-levels"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
     }
 
     pub fn vault(&mut self, name: &'static str, share_id: &'static str) -> &mut Self {
@@ -173,6 +190,7 @@ impl Harness {
             .env("XDG_CACHE_HOME", self.cache_dir())
             .env("PQ_FAKE_DIR", self.fake_dir())
             .env("NO_COLOR", "1")
+            .envs(self.extra_env.iter().copied())
             .stdin(Stdio::null())
             .output()
             .expect("run pq");

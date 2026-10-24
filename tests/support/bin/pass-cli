@@ -17,6 +17,15 @@ printf '%s\n' "$record" >>"$dir/calls"
 
 command="${1:-}-${2:-}"
 
+# The log levels pass-cli was started with. With debug logging on, real
+# pass-cli (through its HTTP library) logs whole requests, bearer token
+# included, to stderr; the fake does the same so tests can prove pq never
+# lets that through.
+printf '%s %s\n' "${MUON_LOG_LEVEL:-unset}" "${PASS_LOG_LEVEL:-unset}" >>"$dir/log-levels"
+if [ "${MUON_LOG_LEVEL:-off}" != off ]; then
+    echo "2026-10-24T12:00:00Z DEBUG muon: sending request: Authorization: Bearer tok-FAKE-SESSION-TOKEN" >&2
+fi
+
 # Injected failure: fail/<command> holds the stderr text, fail/<command>.code
 # the exit status (default 1). fail/item-list.<share-id> fails one vault.
 if [ -f "$dir/fail/$command" ]; then

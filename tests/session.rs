@@ -179,3 +179,65 @@ fn a_session_problem_is_reported_without_waiting_for_slow_vaults() {
         "waited {took:?} for a slow vault"
     );
 }
+
+#[test]
+fn debug_logging_in_the_users_environment_never_reaches_pq_output() {
+    let mut h = personal_vault();
+    h.env("MUON_LOG_LEVEL", "debug")
+        .env("PASS_LOG_LEVEL", "debug");
+    h.fail(
+        "vault-list",
+        "Error: Error listing vaults\n\nCaused by:\n    Could not perform operation. Reason: InvalidValue\n",
+    );
+
+    let out = h.run(&["github", "-p"]);
+
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(!err.contains("tok-FAKE-SESSION-TOKEN"), "{err}");
+    // pq turns pass-cli's logging off for every call.
+    let levels = h.pass_cli_log_levels();
+    assert!(!levels.is_empty());
+    assert!(levels.iter().all(|l| l == "off off"), "{levels:?}");
+}
+
+#[test]
+fn pass_cli_stderr_is_summarised_not_echoed() {
+    let h = personal_vault();
+    h.fail(
+        "vault-list",
+        "2026-10-24T12:00:00Z DEBUG muon: request: Authorization: Bearer tok-LEAKED\n\
+         Error: Error listing vaults\n\nCaused by:\n    0: Error fetching vaults\n    \
+         1: Could not perform operation. Reason: NotAllowed\n",
+    );
+
+    let out = h.run(&["github", "-p"]);
+
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(!err.contains("tok-LEAKED"), "{err}");
+    assert!(!err.contains("DEBUG"), "{err}");
+    assert!(err.contains("Error listing vaults"), "{err}");
+    assert!(err.contains("NotAllowed"), "{err}");
+}
+
+#[test]
+fn an_item_title_in_an_error_cannot_send_terminal_escapes() {
+    let mut h = Harness::new();
+    h.vault("Shared", "share-shared").login(
+        "share-shared",
+        Login {
+            id: "item-escape",
+            title: "github \u{1b}]0;pwned\u{7}",
+            ..GITHUB
+        },
+    );
+    h.fail("item-view", "Error: Error retrieving item\n");
+
+    let out = h.run(&["github", "-p"]);
+
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(!err.contains('\u{1b}'), "{err:?}");
+    assert!(err.contains("github \\u{1b}]0;pwned"), "{err:?}");
+}
