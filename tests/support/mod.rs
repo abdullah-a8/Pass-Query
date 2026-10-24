@@ -154,6 +154,24 @@ impl Harness {
         output
     }
 
+    /// The argument logs of every fake tool, read whole rather than split
+    /// into lines or arguments, so a secret containing a newline is found too.
+    fn raw_argument_logs(&self) -> Vec<String> {
+        let fake = self.fake_dir();
+        let mut logs: Vec<String> = ["calls", "fzf-args"]
+            .iter()
+            .filter_map(|name| fs::read_to_string(fake.join(name)).ok())
+            .collect();
+        if let Ok(entries) = fs::read_dir(fake.join("clipboard")) {
+            for entry in entries.flatten() {
+                if entry.path().extension().is_some_and(|ext| ext == "args") {
+                    logs.extend(fs::read_to_string(entry.path()).ok());
+                }
+            }
+        }
+        logs
+    }
+
     /// Every username, email and password in the scenario.
     pub fn secrets(&self) -> Vec<&'static str> {
         self.items
@@ -169,18 +187,16 @@ impl Harness {
 
     fn assert_no_leaks(&self, output: &Output) {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let mut argv: Vec<String> = self.calls().into_iter().flatten().collect();
-        argv.extend(self.all_fzf_args());
-        argv.extend(self.copies().into_iter().map(|(_, args)| args));
+        let argument_logs = self.raw_argument_logs();
         for secret in self.secrets() {
             assert!(
                 !stderr.contains(secret),
                 "stderr leaks {secret:?}:\n{stderr}"
             );
-            for arg in &argv {
+            for log in &argument_logs {
                 assert!(
-                    !arg.contains(secret),
-                    "{secret:?} passed as an argument: {arg}"
+                    !log.contains(secret),
+                    "{secret:?} passed as an argument: {log}"
                 );
             }
         }
@@ -225,16 +241,8 @@ impl Harness {
 
     /// The arguments of the last fzf invocation, tab-separated.
     pub fn fzf_args(&self) -> Option<String> {
-        self.all_fzf_args().pop()
-    }
-
-    /// The arguments of every fzf invocation, one tab-separated string each.
-    fn all_fzf_args(&self) -> Vec<String> {
-        fs::read_to_string(self.fake_dir().join("fzf-args"))
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_string)
-            .collect()
+        let log = fs::read_to_string(self.fake_dir().join("fzf-args")).ok()?;
+        log.lines().last().map(str::to_string)
     }
 
     pub fn fzf_input(&self) -> Option<String> {
