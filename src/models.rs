@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Vault list response from `pass-cli vault list --output json`
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -62,7 +63,7 @@ impl ItemList {
 
 /// Internal search result. The password is intentionally absent: the list output
 /// carries no secrets, so it is always fetched fresh via `item view`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Match {
     pub item_id: Option<String>,
     pub share_id: Option<String>,
@@ -74,6 +75,20 @@ pub struct Match {
     /// short item-id label when Proton has no account field or the fetch fails.
     /// Never holds the password and is never cached.
     pub account: Option<String>,
+}
+
+// Written by hand so the account (a username or email) never reaches logs.
+impl fmt::Debug for Match {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Match")
+            .field("item_id", &self.item_id)
+            .field("share_id", &self.share_id)
+            .field("title", &self.title)
+            .field("vault_name", &self.vault_name)
+            .field("item_type", &self.item_type)
+            .field("account", &self.account.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 impl Match {
@@ -117,9 +132,18 @@ impl ItemViewItem {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct ItemViewContent {
     pub content: Option<serde_json::Value>,
+}
+
+// Written by hand: `content` holds the item's credentials.
+impl fmt::Debug for ItemViewContent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ItemViewContent")
+            .field("content", &self.content.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 impl ItemViewContent {
@@ -318,6 +342,19 @@ mod tests {
             item_type: item_type.to_string(),
             account: account.map(|s| s.to_string()),
         }
+    }
+
+    #[test]
+    fn debug_output_never_shows_credentials() {
+        let view: ItemView = serde_json::from_str(ITEM_VIEW_JSON).unwrap();
+        let shown = format!("{view:?}");
+        for secret in ["s3cr3t", "myuser", "me@example.com"] {
+            assert!(!shown.contains(secret), "{shown}");
+        }
+
+        let shown = format!("{:?}", make_match(Some("alice@example.com"), "login"));
+        assert!(!shown.contains("alice@example.com"), "{shown}");
+        assert!(shown.contains("reddit"), "{shown}");
     }
 
     #[test]
