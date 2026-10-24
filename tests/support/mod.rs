@@ -185,6 +185,18 @@ impl Harness {
         fs::write(dir.join(format!("item-view.{item_id}")), stderr).unwrap();
     }
 
+    /// Make the fake report `version` from `pass-cli --version` (default 2.5.1).
+    pub fn pass_cli_version(&self, version: &str) {
+        fs::write(self.fake_dir().join("version"), version).unwrap();
+    }
+
+    /// Make `pass-cli --version` take `seconds` to answer.
+    pub fn slow_version(&self, seconds: u32) {
+        let dir = self.fake_dir().join("delay");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("version"), seconds.to_string()).unwrap();
+    }
+
     /// Choose the 1-based picker line fzf returns.
     pub fn pick(&self, line: usize) {
         fs::write(self.fake_dir().join("fzf-pick"), line.to_string()).unwrap();
