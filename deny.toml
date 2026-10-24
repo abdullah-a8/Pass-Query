@@ -1,0 +1,37 @@
+# cargo-deny configuration: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# pq ships for Linux and macOS only.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+
+[advisories]
+# Every RustSec advisory (vulnerability, unsoundness, unmaintained) fails
+# the check; yanked crates do too.
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Permissive licences, plus MPL-2.0 (file-level copyleft, used by `colored`),
+# all compatible with pq's MIT licence.
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
