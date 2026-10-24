@@ -4,6 +4,10 @@ reviews:
   profile: assertive
   auto_review:
     enabled: true
+    # Review when a PR opens, and again only on request (`@coderabbitai
+    # review`) once its fixes are in: a review on every push exhausted the
+    # plan's hourly allowance while fixes landed one review round at a time.
+    auto_incremental_review: false
     # Review PRs targeting any base branch, not just the default branch,
     # so stacked PRs are reviewed too.
     base_branches:
