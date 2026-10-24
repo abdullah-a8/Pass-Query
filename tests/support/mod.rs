@@ -161,12 +161,15 @@ impl Harness {
     fn raw_argument_logs(&self) -> Vec<(PathBuf, Vec<u8>)> {
         let fake = self.fake_dir();
         let mut paths = vec![fake.join("calls"), fake.join("fzf-args")];
-        if let Ok(entries) = fs::read_dir(fake.join("clipboard")) {
-            paths.extend(
+        match fs::read_dir(fake.join("clipboard")) {
+            Ok(entries) => paths.extend(
                 entries
                     .map(|entry| entry.expect("read clipboard log dir").path())
                     .filter(|path| path.extension().is_some_and(|ext| ext == "args")),
-            );
+            ),
+            // Nothing was copied.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("read clipboard log dir: {e}"),
         }
         paths
             .into_iter()
