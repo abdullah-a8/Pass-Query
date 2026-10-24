@@ -1,6 +1,6 @@
 [package]
 name = "pq"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Fast fuzzy password search for Proton Pass CLI"
