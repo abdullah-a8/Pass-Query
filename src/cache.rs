@@ -2,7 +2,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
@@ -122,24 +123,41 @@ fn cache_safe_vault_list(vaults: &VaultList) -> VaultList {
     }
 }
 
-fn write_cache_file(cache_path: &PathBuf, cache_json: &str) -> Result<()> {
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-
+/// Create the cache directory if needed and make it private to the user.
+fn ensure_private_dir(dir: &Path) -> Result<()> {
+    fs::create_dir_all(dir).context("Failed to create cache directory")?;
     #[cfg(unix)]
-    options.mode(0o600);
-
-    let mut file = options
-        .open(cache_path)
-        .context("Failed to open cache file for writing")?;
-    file.write_all(cache_json.as_bytes())
-        .context("Failed to write cache file")?;
-
-    #[cfg(unix)]
-    fs::set_permissions(cache_path, fs::Permissions::from_mode(0o600))
-        .context("Failed to restrict cache file permissions")?;
-
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+        .context("Failed to restrict cache directory permissions")?;
     Ok(())
+}
+
+/// Replace the cache file with `cache_json`. The JSON goes to a new 0600 file
+/// beside it, which is then renamed over it: a reader never sees a partial
+/// file, and a link planted at the cache path is replaced, not followed.
+fn write_cache_file(cache_path: &Path, cache_json: &str) -> Result<()> {
+    static WRITES: AtomicUsize = AtomicUsize::new(0);
+    let dir = cache_path.parent().context("Cache path has no directory")?;
+    let temp = dir.join(format!(
+        ".vault-cache.{}.{}.tmp",
+        std::process::id(),
+        WRITES.fetch_add(1, Ordering::Relaxed)
+    ));
+
+    let written = (|| -> std::io::Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&temp)?;
+        file.write_all(cache_json.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&temp, cache_path)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    written.context("Failed to write cache file")
 }
 
 /// A vault's cached item list, if one was written within the last day.
@@ -172,7 +190,7 @@ pub fn set_cached_vault(vault_key: &str, login_only: bool, items: &ItemList) -> 
 
     // Create cache directory if it doesn't exist
     if let Some(parent) = cache_path.parent() {
-        fs::create_dir_all(parent).context("Failed to create cache directory")?;
+        ensure_private_dir(parent)?;
     }
 
     // Load existing cache or create new one
@@ -237,7 +255,7 @@ pub fn set_cached_vault_list(vaults: &VaultList) -> Result<()> {
     let cache_path = get_cache_path()?;
 
     if let Some(parent) = cache_path.parent() {
-        fs::create_dir_all(parent).context("Failed to create cache directory")?;
+        ensure_private_dir(parent)?;
     }
 
     let mut cache = if cache_path.exists() {
