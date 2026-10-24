@@ -322,3 +322,28 @@ fn a_vault_name_in_an_error_cannot_send_terminal_escapes() {
     assert!(err.contains("vault search failed"), "{err}");
     assert!(!err.contains('\u{1b}'), "{err:?}");
 }
+
+#[test]
+fn a_trashed_item_title_in_an_error_cannot_send_terminal_escapes() {
+    let mut h = Harness::new();
+    h.vault("Shared", "share-shared").login(
+        "share-shared",
+        Login {
+            id: "item-escape",
+            title: "github \u{1b}]0;pwned\u{7}\u{202e}",
+            ..GITHUB
+        },
+    );
+    assert!(h.run(&["github", "-p"]).status.success()); // cached while active
+    h.trash("item-escape");
+
+    let out = h.run(&["github", "-p"]);
+
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("in the trash"), "{err}");
+    assert!(
+        !err.contains('\u{1b}') && !err.contains('\u{202e}'),
+        "{err:?}"
+    );
+}

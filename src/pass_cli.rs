@@ -286,7 +286,7 @@ pub async fn get_item_credentials(item: &Match) -> Result<(Option<String>, Strin
         anyhow::bail!(
             "{} '{}' is in the trash. Run pq with {} to refresh the cache.",
             "✗".red(),
-            item.title,
+            printable(&item.title),
             "-r".bold()
         );
     }
