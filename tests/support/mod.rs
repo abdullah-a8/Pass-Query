@@ -507,10 +507,18 @@ impl Harness {
         cache
     }
 
+    /// Write the cache file as pq would: 0600, in a 0700 directory.
     pub fn write_cache(&self, contents: &str) {
         let path = self.cache_file();
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, contents).unwrap();
+        let dir = path.parent().unwrap();
+        fs::create_dir_all(dir).unwrap();
+        fs::write(&path, contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
     }
 
     pub fn cache_file(&self) -> PathBuf {

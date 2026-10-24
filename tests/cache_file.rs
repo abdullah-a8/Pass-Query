@@ -1,5 +1,6 @@
-//! The cache file and its directory are private to the user, and writing the
-//! cache never follows a planted link or leaves a partial file.
+//! The cache file and its directory are private to the user, writing the
+//! cache never follows a planted link or leaves a partial file, and a cache
+//! someone else could have written is never read.
 
 #![cfg(unix)]
 
@@ -17,11 +18,48 @@ const GITHUB: Login = Login {
     password: "github-secret",
 };
 
+const BANK: Login = Login {
+    id: "item-bank",
+    title: "bank",
+    username: "banker",
+    email: "",
+    password: "bank-secret",
+};
+
 fn harness() -> Harness {
     let mut h = Harness::new();
     h.vault("Personal", "share-personal")
-        .login("share-personal", GITHUB);
+        .login("share-personal", GITHUB)
+        .login("share-personal", BANK);
     h
+}
+
+/// A fresh cache that lists "github" under the bank item's ID: if pq read
+/// it, a search for github would copy the bank password.
+fn substituted_cache() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    serde_json::json!({
+        "version": 3,
+        "vault_list": { "vaults": { "vaults": [{ "name": "Personal", "share_id": "share-personal" }] }, "timestamp": now },
+        "vaults": [{
+            "vault_key": "share:share-personal", "login_only": true, "timestamp": now,
+            "items": { "items": [{ "id": "item-bank", "share_id": "share-personal",
+                                    "title": "github", "item_type": "login" }] }
+        }]
+    })
+    .to_string()
+}
+
+fn assert_cache_ignored(h: &Harness) {
+    let out = h.run(&["github", "-p"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "Username: octocat\nPassword: github-secret\n"
+    );
 }
 
 fn mode(path: &std::path::Path) -> u32 {
@@ -80,4 +118,59 @@ fn writing_the_cache_leaves_only_the_cache_file() {
         .collect();
     assert_eq!(names, ["vault-cache.json"]);
     h.cache_json(); // still valid and secret-free
+}
+
+#[test]
+fn a_cache_reached_through_a_link_is_not_read() {
+    let h = harness();
+    let dir = h.cache_file().parent().unwrap().to_path_buf();
+    fs::create_dir_all(&dir).unwrap();
+    let planted = dir.parent().unwrap().join("planted.json");
+    fs::write(&planted, substituted_cache()).unwrap();
+    std::os::unix::fs::symlink(&planted, h.cache_file()).unwrap();
+
+    assert_cache_ignored(&h);
+}
+
+#[test]
+fn a_cache_file_others_can_write_is_not_read() {
+    let h = harness();
+    h.write_cache(&substituted_cache());
+    fs::set_permissions(h.cache_file(), fs::Permissions::from_mode(0o666)).unwrap();
+
+    assert_cache_ignored(&h);
+}
+
+#[test]
+fn a_cache_in_a_directory_others_can_write_is_not_read() {
+    let h = harness();
+    h.write_cache(&substituted_cache());
+    fs::set_permissions(h.cache_file(), fs::Permissions::from_mode(0o600)).unwrap();
+    let dir = h.cache_file().parent().unwrap().to_path_buf();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();
+
+    assert_cache_ignored(&h);
+}
+
+#[test]
+fn a_cache_directory_reached_through_a_link_is_not_used() {
+    let h = harness();
+    let real = h
+        .cache_file()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("elsewhere");
+    fs::create_dir_all(&real).unwrap();
+    fs::set_permissions(&real, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(real.join("vault-cache.json"), substituted_cache()).unwrap();
+    fs::set_permissions(
+        real.join("vault-cache.json"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&real, h.cache_file().parent().unwrap()).unwrap();
+
+    assert_cache_ignored(&h);
 }

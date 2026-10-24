@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -123,13 +123,64 @@ fn cache_safe_vault_list(vaults: &VaultList) -> VaultList {
     }
 }
 
-/// Create the cache directory if needed and make it private to the user.
+/// Create the cache directory if needed and make it private to the user. An
+/// existing path that is a link or belongs to someone else is left alone.
 fn ensure_private_dir(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir).context("Failed to create cache directory")?;
     #[cfg(unix)]
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
-        .context("Failed to restrict cache directory permissions")?;
+    {
+        let meta = fs::symlink_metadata(dir).context("Failed to inspect cache directory")?;
+        if !meta.file_type().is_dir() || !owned_by_user(&meta) {
+            anyhow::bail!("Cache directory is a link or not yours");
+        }
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+            .context("Failed to restrict cache directory permissions")?;
+    }
     Ok(())
+}
+
+/// The cache file's contents, if the cache can be trusted: a regular file,
+/// not reached through a link, in a real directory, both the user's and
+/// writable by no one else. Anything else may have been written by someone
+/// else, who could pair a title with another item's IDs. Such a cache is
+/// treated as missing, so pq fetches fresh metadata.
+fn read_cache_file(cache_path: &Path) -> Option<String> {
+    #[cfg(unix)]
+    {
+        let dir = fs::symlink_metadata(cache_path.parent()?).ok()?;
+        if !(dir.file_type().is_dir() && is_private(&dir)) {
+            return None;
+        }
+        // O_NOFOLLOW refuses a link at the cache path; the checks then apply
+        // to the file actually opened.
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(cache_path)
+            .ok()?;
+        let meta = file.metadata().ok()?;
+        if !(meta.file_type().is_file() && is_private(&meta)) {
+            return None;
+        }
+        let mut data = String::new();
+        file.read_to_string(&mut data).ok()?;
+        Some(data)
+    }
+    #[cfg(not(unix))]
+    fs::read_to_string(cache_path).ok()
+}
+
+#[cfg(unix)]
+fn owned_by_user(meta: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: getuid takes no arguments and cannot fail.
+    meta.uid() == unsafe { libc::getuid() }
+}
+
+/// The user's, and writable by no one else.
+#[cfg(unix)]
+fn is_private(meta: &fs::Metadata) -> bool {
+    owned_by_user(meta) && meta.permissions().mode() & 0o022 == 0
 }
 
 /// Replace the cache file with `cache_json`. The JSON goes to a new 0600 file
@@ -160,15 +211,20 @@ fn write_cache_file(cache_path: &Path, cache_json: &str) -> Result<()> {
     written.context("Failed to write cache file")
 }
 
+/// The cache to update, and its directory made ready for the write. The
+/// existing contents are judged before the directory is made private:
+/// contents found in a directory that others could write are dropped, not
+/// carried into the new file.
+fn load_for_update(cache_path: &Path) -> Result<Cache> {
+    let existing = read_cache_file(cache_path).and_then(|data| parse_cache(&data));
+    ensure_private_dir(cache_path.parent().context("Cache path has no directory")?)?;
+    Ok(existing.unwrap_or_default())
+}
+
 /// A vault's cached item list, if one was written within the last day.
 pub fn get_cached_vault(vault_key: &str, login_only: bool) -> Option<ItemList> {
     let cache_path = get_cache_path().ok()?;
-    if !cache_path.exists() {
-        return None;
-    }
-
-    let cache_data = fs::read_to_string(&cache_path).ok()?;
-    let cache = parse_cache(&cache_data)?;
+    let cache = parse_cache(&read_cache_file(&cache_path)?)?;
 
     // The newest fresh entry wins: a list for all item types also serves a
     // login-only search, but not when a newer login-only list exists (the
@@ -188,18 +244,7 @@ pub fn get_cached_vault(vault_key: &str, login_only: bool) -> Option<ItemList> {
 pub fn set_cached_vault(vault_key: &str, login_only: bool, items: &ItemList) -> Result<()> {
     let cache_path = get_cache_path()?;
 
-    // Create cache directory if it doesn't exist
-    if let Some(parent) = cache_path.parent() {
-        ensure_private_dir(parent)?;
-    }
-
-    // Load existing cache or create new one
-    let mut cache = if cache_path.exists() {
-        let cache_data = fs::read_to_string(&cache_path)?;
-        parse_cache(&cache_data).unwrap_or_default()
-    } else {
-        Cache::default()
-    };
+    let mut cache = load_for_update(&cache_path)?;
 
     let timestamp = get_current_timestamp();
 
@@ -236,12 +281,7 @@ pub fn set_cached_vault(vault_key: &str, login_only: bool, items: &ItemList) -> 
 
 pub fn get_cached_vault_list() -> Option<VaultList> {
     let cache_path = get_cache_path().ok()?;
-    if !cache_path.exists() {
-        return None;
-    }
-
-    let cache_data = fs::read_to_string(&cache_path).ok()?;
-    let cache = parse_cache(&cache_data)?;
+    let cache = parse_cache(&read_cache_file(&cache_path)?)?;
     let cached = cache.vault_list?;
 
     if is_fresh(cached.timestamp) {
@@ -254,16 +294,7 @@ pub fn get_cached_vault_list() -> Option<VaultList> {
 pub fn set_cached_vault_list(vaults: &VaultList) -> Result<()> {
     let cache_path = get_cache_path()?;
 
-    if let Some(parent) = cache_path.parent() {
-        ensure_private_dir(parent)?;
-    }
-
-    let mut cache = if cache_path.exists() {
-        let cache_data = fs::read_to_string(&cache_path)?;
-        parse_cache(&cache_data).unwrap_or_default()
-    } else {
-        Cache::default()
-    };
+    let mut cache = load_for_update(&cache_path)?;
 
     cache.vault_list = Some(CachedVaultList {
         vaults: cache_safe_vault_list(vaults),
