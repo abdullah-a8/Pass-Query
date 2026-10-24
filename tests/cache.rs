@@ -178,6 +178,33 @@ fn a_cached_item_deleted_in_proton_is_searched_again_with_fresh_data() {
 }
 
 #[test]
+fn a_cached_item_whose_vault_was_deleted_meanwhile_is_searched_again() {
+    let mut h = personal_vault();
+    assert!(h.run(&["github", "-p"]).status.success());
+    // pass-cli 2.5.1 when the share goes between fetching the item and
+    // opening it.
+    h.fail_item(
+        "item-github",
+        "Error: Error retrieving item\n\nCaused by:\n    Share with id share-personal not found\n",
+    );
+    h.remove("item-github").login(
+        "share-personal",
+        Login {
+            id: "item-github-new",
+            password: "rotated",
+            ..GITHUB
+        },
+    );
+    h.clear_calls();
+
+    let out = h.run(&["github", "-p"]);
+
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "Username: octocat\nPassword: rotated\n");
+    assert_eq!(h.calls_to("item view").len(), 2);
+}
+
+#[test]
 fn a_session_problem_on_a_cached_item_is_reported_without_refreshing() {
     let h = personal_vault();
     assert!(h.run(&["github", "-p"]).status.success());

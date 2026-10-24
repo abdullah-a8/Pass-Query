@@ -104,17 +104,24 @@ impl fmt::Display for ItemUnavailable {
 
 impl std::error::Error for ItemUnavailable {}
 
-/// Whether a failed `item view` says the item (or its vault) no longer
-/// exists: Proton's NotExists or DeletedShare codes, or a plain 404 when the
-/// response carried no code.
+/// Whether a failed `item view` says the item, or the vault holding it, is
+/// gone or no longer shared with this account: Proton's NotExists or
+/// DeletedShare codes, a vault deleted between fetching the item and opening
+/// it, or a bare HTTP status when pass-cli printed only that (it does for
+/// item revisions).
 fn item_is_gone(stderr: &str) -> bool {
-    [
+    const MARKERS: [&str; 6] = [
         "Reason: NotExists",
         "Reason: DeletedShare",
+        "Invalid status code: 403",
         "Invalid status code: 404",
-    ]
-    .iter()
-    .any(|marker| stderr.contains(marker))
+        "Invalid status code: 410",
+        "Invalid status code: 422",
+    ];
+    MARKERS.iter().any(|marker| stderr.contains(marker))
+        || stderr
+            .lines()
+            .any(|line| line.contains("Share with id ") && line.ends_with(" not found"))
 }
 
 /// A `pass-cli` command with its logging off and killed if dropped. With
@@ -320,7 +327,7 @@ pub async fn get_item_credentials(item: &Match) -> Result<(Option<String>, Strin
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if SessionProblem::from_stderr(&stderr).is_none() && item_is_gone(&stderr) {
-            return Err(ItemUnavailable::new(item, "no longer exists").into());
+            return Err(ItemUnavailable::new(item, "is no longer available").into());
         }
         return Err(failure(
             &format!("pass-cli item view for '{}'", printable(&item.title)),
@@ -424,6 +431,20 @@ mod tests {
         ));
         assert!(item_is_gone("Reason: DeletedShare"));
         assert!(item_is_gone("Error: Invalid status code: 404 Not Found"));
+        assert!(item_is_gone("Error: Invalid status code: 403 Forbidden"));
+        assert!(item_is_gone("Error: Invalid status code: 410 Gone"));
+        assert!(item_is_gone(
+            "Error: Invalid status code: 422 Unprocessable Entity"
+        ));
+        assert!(item_is_gone(
+            "Error: Error retrieving item\n\nCaused by:\n    Share with id abc not found"
+        ));
+        assert!(!item_is_gone(
+            "Error: Invalid status code: 500 Internal Server Error"
+        ));
+        assert!(!item_is_gone(
+            "Error: Invalid status code: 401 Unauthorized"
+        ));
         assert!(!item_is_gone("Error: Error opening item"));
         assert!(!item_is_gone("Reason: NotAllowed"));
     }
