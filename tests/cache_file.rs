@@ -125,8 +125,12 @@ fn a_cache_reached_through_a_link_is_not_read() {
     let h = harness();
     let dir = h.cache_file().parent().unwrap().to_path_buf();
     fs::create_dir_all(&dir).unwrap();
+    // Everything else private, so only the link can be the reason it is
+    // not read.
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     let planted = dir.parent().unwrap().join("planted.json");
     fs::write(&planted, substituted_cache()).unwrap();
+    fs::set_permissions(&planted, fs::Permissions::from_mode(0o600)).unwrap();
     std::os::unix::fs::symlink(&planted, h.cache_file()).unwrap();
 
     assert_cache_ignored(&h);
