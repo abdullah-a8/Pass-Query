@@ -1,0 +1,18 @@
+#!/bin/sh
+# Fake fzf: records its input and (appending) its arguments, then prints the line chosen in
+# $PQ_FAKE_DIR/fzf-pick (1-based, default 1) or exits 130 when it says
+# "cancel", as fzf does on Esc.
+set -u
+dir=${PQ_FAKE_DIR:?PQ_FAKE_DIR is not set}
+
+cat >"$dir/fzf-input"
+# One line per invocation, appended, so no earlier call's arguments are lost.
+record=""
+for arg in "$@"; do record="$record$arg	"; done
+printf '%s\n' "$record" >>"$dir/fzf-args"
+
+pick=$(cat "$dir/fzf-pick" 2>/dev/null || echo 1)
+if [ "$pick" = cancel ]; then
+    exit 130
+fi
+sed -n "${pick}p" "$dir/fzf-input"

@@ -1,0 +1,12 @@
+#!/bin/sh
+# Fake clipboard tool, installed as wl-copy and pbcopy. Each copy is stored
+# as clipboard/<n>.txt (n counts from 0) with its arguments in
+# clipboard/<n>.args, so tests can check order, content and that no secret
+# was passed on the command line.
+set -u
+dir=${PQ_FAKE_DIR:?PQ_FAKE_DIR is not set}
+
+mkdir -p "$dir/clipboard"
+n=$(find "$dir/clipboard" -name '*.txt' | wc -l | tr -d ' ')
+for arg in "$@"; do printf '%s\t' "$arg"; done >"$dir/clipboard/$n.args"
+cat >"$dir/clipboard/$n.txt"
