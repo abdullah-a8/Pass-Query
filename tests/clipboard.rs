@@ -190,6 +190,23 @@ mod linux {
         let err = stderr(&out);
         assert!(err.contains("wl-copy"), "{err}");
         assert!(err.contains("wl-clipboard"), "{err}");
+        assert!(err.contains("-p"), "{err}");
+        assert!(h.calls().is_empty(), "found before the search");
+    }
+
+    #[test]
+    fn a_missing_xclip_is_found_before_the_search() {
+        let mut h = harness();
+        h.display(Display::X11);
+        h.remove_tool("xclip");
+        h.remove_tool("xsel");
+
+        let out = h.run(&["wifi"]);
+
+        assert!(!out.status.success());
+        let err = stderr(&out);
+        assert!(err.contains("xclip"), "{err}");
+        assert!(h.calls().is_empty(), "found before the search");
     }
 
     #[test]

@@ -90,6 +90,15 @@ impl Clipboard {
                 "-p".bold()
             );
         };
+        let (program, _) = tool.copy_command();
+        if !on_path(program) {
+            bail!(
+                "{} {program} not found. {}, or use {} to print the credentials instead.",
+                "✗".red(),
+                tool.install_hint(),
+                "-p".bold()
+            );
+        }
         Ok(Clipboard { tool })
     }
 
@@ -112,13 +121,19 @@ impl Clipboard {
                     self.tool.install_hint()
                 )
             })?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(text.as_bytes())?;
-        }
+        // A tool that exits early (xclip without a display) closes the pipe
+        // before the write; its exit status says more than "broken pipe".
+        // Dropping stdin after the write gives the tool its end of input.
+        let written = child
+            .stdin
+            .take()
+            .map(|mut stdin| stdin.write_all(text.as_bytes()))
+            .transpose();
         let status = child.wait()?;
         if !status.success() {
             bail!("{} {program} failed ({status})", "✗".red());
         }
+        written.with_context(|| format!("{} write to {program}", "✗".red()))?;
         Ok(())
     }
 
