@@ -170,6 +170,14 @@ pub async fn get_item_credentials(item: &Match) -> Result<(Option<String>, Strin
 
     let item_view: ItemView =
         serde_json::from_str(&stdout).context("Failed to parse item view JSON")?;
+    if !item_view.item.is_active() {
+        anyhow::bail!(
+            "{} '{}' is in the trash. Run pq with {} to refresh the cache.",
+            "✗".red(),
+            item.title,
+            "-r".bold()
+        );
+    }
 
     let username = item_view.item.content.get_username();
     let password = item_view

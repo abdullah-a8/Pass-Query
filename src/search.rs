@@ -46,11 +46,15 @@ fn title_key(title: &str) -> String {
 /// Uses caching to speed up repeated searches
 async fn search_vault(vault: Vault, query: String, login_only: bool) -> Result<Vec<Match>> {
     // Try to get from cache first
+    // Cached lists were filtered when written; filtering again keeps a cache
+    // edited by hand or by another tool from offering trashed items.
     let item_list = if let Some(cached) = cache::get_cached_vault(&vault.name, login_only) {
-        cached
+        cached.into_active()
     } else {
         // Not in cache, fetch from pass-cli
-        let items = pass_cli::list_vault_items(&vault, login_only).await?;
+        let items = pass_cli::list_vault_items(&vault, login_only)
+            .await?
+            .into_active();
         // Store in cache for future use
         let _ = cache::set_cached_vault(&vault.name, login_only, &items);
         items
@@ -195,6 +199,7 @@ mod tests {
             share_id: Some("share-1".to_string()),
             title: title.to_string(),
             item_type: item_type.to_string(),
+            state: None,
         }
     }
 

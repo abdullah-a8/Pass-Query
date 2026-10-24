@@ -38,6 +38,26 @@ pub struct Item {
     // for display in the picker. Defaulted so a future rename can never break search.
     #[serde(default)]
     pub item_type: String,
+    // Lifecycle state ("Active" or "Trashed"). pass-cli lists trashed items
+    // too, so pq drops everything that is not active before searching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+}
+
+impl Item {
+    /// Active items, and items whose state pass-cli did not report.
+    pub fn is_active(&self) -> bool {
+        matches!(self.state.as_deref(), None | Some("Active"))
+    }
+}
+
+impl ItemList {
+    /// The same list without trashed (or otherwise inactive) items.
+    pub fn into_active(self) -> ItemList {
+        ItemList {
+            items: self.items.into_iter().filter(Item::is_active).collect(),
+        }
+    }
 }
 
 /// Internal search result. The password is intentionally absent: the list output
@@ -85,6 +105,16 @@ pub struct ItemView {
 #[derive(Debug, Deserialize)]
 pub struct ItemViewItem {
     pub content: ItemViewContent,
+    /// "Active" or "Trashed", read fresh with the credentials: a cached match
+    /// may have been trashed since it was cached.
+    #[serde(default)]
+    pub state: Option<String>,
+}
+
+impl ItemViewItem {
+    pub fn is_active(&self) -> bool {
+        matches!(self.state.as_deref(), None | Some("Active"))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,6 +204,23 @@ mod tests {
         assert_eq!(list.items[0].item_type, "login");
         assert_eq!(list.items[1].title, "personal note");
         assert_eq!(list.items[1].item_type, "note");
+    }
+
+    #[test]
+    fn into_active_drops_trashed_items_and_keeps_unknown_state() {
+        let json = r#"{ "items": [
+          { "title": "live", "state": "Active" },
+          { "title": "binned", "state": "Trashed" },
+          { "title": "old pass-cli" }
+        ] }"#;
+        let list: ItemList = serde_json::from_str(json).unwrap();
+        let titles: Vec<String> = list
+            .into_active()
+            .items
+            .into_iter()
+            .map(|i| i.title)
+            .collect();
+        assert_eq!(titles, ["live", "old pass-cli"]);
     }
 
     #[test]
