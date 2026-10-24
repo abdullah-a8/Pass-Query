@@ -326,6 +326,7 @@ fn a_missing_pass_cli_is_reported_with_an_install_link() {
 
     assert!(!out.status.success());
     assert!(stderr(&out).contains("pass-cli not found"));
+    assert!(stderr(&out).contains("https://protonpass.github.io/pass-cli/"));
 }
 
 #[test]

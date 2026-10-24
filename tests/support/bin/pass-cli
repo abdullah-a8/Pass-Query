@@ -17,6 +17,15 @@ printf '%s\n' "$record" >>"$dir/calls"
 
 command="${1:-}-${2:-}"
 
+# The log levels pass-cli was started with. With debug logging on, real
+# pass-cli (through its HTTP library) logs whole requests, bearer token
+# included, to stderr; the fake does the same so tests can prove pq never
+# lets that through.
+printf '%s %s\n' "${MUON_LOG_LEVEL:-unset}" "${PASS_LOG_LEVEL:-unset}" >>"$dir/log-levels"
+if [ "${MUON_LOG_LEVEL:-off}" != off ]; then
+    echo "2026-10-24T12:00:00Z DEBUG muon: sending request: Authorization: Bearer tok-FAKE-SESSION-TOKEN" >&2
+fi
+
 # Injected failure: fail/<command> holds the stderr text, fail/<command>.code
 # the exit status (default 1). fail/item-list.<share-id> fails one vault.
 if [ -f "$dir/fail/$command" ]; then
@@ -50,6 +59,10 @@ item-list)
     [ "$output" = json ] || unsupported "item list without --output json"
     [ -n "$share" ] || unsupported "item list without --share-id"
     [ -z "$filter" ] || [ "$filter" = login ] || unsupported "item list --filter-type $filter"
+    # delay/item-list.<share-id> holds seconds to wait first (a slow vault).
+    if [ -f "$dir/delay/item-list.$share" ]; then
+        sleep "$(cat "$dir/delay/item-list.$share")"
+    fi
     if [ -f "$dir/fail/item-list.$share" ]; then
         cat "$dir/fail/item-list.$share" >&2
         exit 1
@@ -75,6 +88,14 @@ item-view)
     done
     [ -n "$share" ] || unsupported "item view without --share-id"
     [ -n "$item" ] || unsupported "item view without --item-id"
+    # delay/item-view.<item-id> slows, fail/item-view.<item-id> fails one item.
+    if [ -f "$dir/delay/item-view.$item" ]; then
+        sleep "$(cat "$dir/delay/item-view.$item")"
+    fi
+    if [ -f "$dir/fail/item-view.$item" ]; then
+        cat "$dir/fail/item-view.$item" >&2
+        exit 1
+    fi
     # Items live under their vault's share: a wrong share finds nothing, as
     # with the real pass-cli.
     if [ ! -f "$dir/views/$share/$item.json" ]; then

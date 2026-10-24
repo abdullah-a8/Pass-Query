@@ -17,7 +17,7 @@ const FAKE_PASS_CLI: &str = include_str!("bin/pass-cli");
 const FAKE_FZF: &str = include_str!("bin/fzf");
 const FAKE_CLIPBOARD: &str = include_str!("bin/clipboard");
 /// The external commands the fake tools run.
-const FAKE_UTILS: [&str; 6] = ["cat", "find", "mkdir", "sed", "tr", "wc"];
+const FAKE_UTILS: [&str; 7] = ["cat", "find", "mkdir", "sed", "sleep", "tr", "wc"];
 
 #[derive(Clone)]
 pub struct Login {
@@ -47,6 +47,7 @@ pub struct Harness {
     root: TempDir,
     vaults: Vec<(&'static str, &'static str)>,
     items: Vec<Item>,
+    extra_env: Vec<(&'static str, &'static str)>,
 }
 
 impl Harness {
@@ -56,6 +57,7 @@ impl Harness {
             root,
             vaults: Vec::new(),
             items: Vec::new(),
+            extra_env: Vec::new(),
         };
         for dir in [
             harness.bin_dir(),
@@ -71,6 +73,21 @@ impl Harness {
         harness.install("wl-copy", FAKE_CLIPBOARD);
         harness.install("pbcopy", FAKE_CLIPBOARD);
         harness
+    }
+
+    /// Set an environment variable for pq (and so for everything it starts).
+    pub fn env(&mut self, key: &'static str, value: &'static str) -> &mut Self {
+        self.extra_env.push((key, value));
+        self
+    }
+
+    /// The (MUON_LOG_LEVEL, PASS_LOG_LEVEL) each pass-cli call was started with.
+    pub fn pass_cli_log_levels(&self) -> Vec<String> {
+        fs::read_to_string(self.fake_dir().join("log-levels"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
     }
 
     pub fn vault(&mut self, name: &'static str, share_id: &'static str) -> &mut Self {
@@ -126,6 +143,35 @@ impl Harness {
         fs::write(dir.join(format!("item-list.{share_id}")), stderr).unwrap();
     }
 
+    /// Make `pass-cli item list` for one vault take `seconds` to answer.
+    pub fn slow_vault(&self, share_id: &str, seconds: u32) {
+        let dir = self.fake_dir().join("delay");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(format!("item-list.{share_id}")),
+            seconds.to_string(),
+        )
+        .unwrap();
+    }
+
+    /// Make `pass-cli item view` for one item take `seconds` to answer.
+    pub fn slow_item(&self, item_id: &str, seconds: u32) {
+        let dir = self.fake_dir().join("delay");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(format!("item-view.{item_id}")),
+            seconds.to_string(),
+        )
+        .unwrap();
+    }
+
+    /// Make `pass-cli item view` fail for one item only.
+    pub fn fail_item(&self, item_id: &str, stderr: &str) {
+        let dir = self.fake_dir().join("fail");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(format!("item-view.{item_id}")), stderr).unwrap();
+    }
+
     /// Choose the 1-based picker line fzf returns.
     pub fn pick(&self, line: usize) {
         fs::write(self.fake_dir().join("fzf-pick"), line.to_string()).unwrap();
@@ -162,6 +208,7 @@ impl Harness {
             .env("XDG_CACHE_HOME", self.cache_dir())
             .env("PQ_FAKE_DIR", self.fake_dir())
             .env("NO_COLOR", "1")
+            .envs(self.extra_env.iter().copied())
             .stdin(Stdio::null())
             .output()
             .expect("run pq");
@@ -248,8 +295,11 @@ impl Harness {
             .collect()
     }
 
+    /// Forget the pass-cli calls and fzf invocations recorded so far.
     pub fn clear_calls(&self) {
-        let _ = fs::remove_file(self.fake_dir().join("calls"));
+        for log in ["calls", "fzf-input", "fzf-args"] {
+            let _ = fs::remove_file(self.fake_dir().join(log));
+        }
     }
 
     /// Everything copied to the clipboard, in order, with the arguments of each copy.

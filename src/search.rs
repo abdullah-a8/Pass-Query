@@ -88,6 +88,9 @@ pub async fn search_all_vaults_limited(
 ) -> Result<Vec<Match>> {
     const MAX_CONCURRENT: usize = 10; // Increased from 4 to 10 for faster first run
 
+    if vaults.is_empty() {
+        anyhow::bail!("{} No vaults found in your Proton Pass account.", "✗".red());
+    }
     let vault_count = vaults.len() as u64;
 
     // Create progress bar
@@ -100,7 +103,7 @@ pub async fn search_all_vaults_limited(
     );
     pb.set_message("Searching vaults");
 
-    let results = stream::iter(vaults)
+    let mut searches = stream::iter(vaults)
         .map(|vault| {
             let query = query.clone();
             let pb = pb.clone();
@@ -110,24 +113,40 @@ pub async fn search_all_vaults_limited(
                 result
             }
         })
-        .buffer_unordered(MAX_CONCURRENT)
-        .collect::<Vec<_>>()
-        .await;
+        .buffer_unordered(MAX_CONCURRENT);
 
-    // Clear progress bar
-    pb.finish_and_clear();
-
-    // Collect all matches, filtering out errors
     let mut all_matches = Vec::new();
-    for result in results {
+    let mut failures = Vec::new();
+    while let Some(result) = searches.next().await {
         match result {
             Ok(matches) => all_matches.extend(matches),
-            Err(e) => eprintln!(
-                "{} vault search failed: {}",
-                "⚠".yellow(),
-                e.to_string().dimmed()
-            ),
+            // A session problem affects every vault: report it at once, with
+            // its fix. Dropping `searches` cancels (and kills) the others.
+            Err(e) => {
+                if let Some(problem) = e.downcast_ref::<pass_cli::SessionProblem>() {
+                    pb.finish_and_clear();
+                    return Err(anyhow::Error::new(*problem));
+                }
+                failures.push(e);
+            }
         }
+    }
+    pb.finish_and_clear();
+
+    // With no vault searched, "no items found" would be misleading.
+    if !failures.is_empty() && failures.len() as u64 == vault_count {
+        anyhow::bail!(
+            "{} Could not search any vault: {:#}",
+            "✗".red(),
+            failures[0]
+        );
+    }
+    for e in &failures {
+        eprintln!(
+            "{} vault search failed: {}",
+            "⚠".yellow(),
+            e.to_string().dimmed()
+        );
     }
 
     // Deterministic order so the picker is stable across runs.
@@ -150,25 +169,34 @@ fn duplicate_title_keys(matches: &[Match]) -> HashSet<String> {
 
 /// Populate account identifiers only when the visible title is ambiguous.
 /// The labels are fetched for the picker, kept in memory, and never cached.
-pub async fn enrich_duplicate_titles_with_accounts(matches: Vec<Match>) -> Vec<Match> {
+pub async fn enrich_duplicate_titles_with_accounts(matches: Vec<Match>) -> Result<Vec<Match>> {
     const MAX_CONCURRENT: usize = 10;
     let duplicate_titles = Arc::new(duplicate_title_keys(&matches));
+    let count = matches.len();
 
-    stream::iter(matches)
-        .map(|mut m| {
+    let mut lookups = stream::iter(matches.into_iter().enumerate())
+        .map(|(index, mut m)| {
             let duplicate_titles = Arc::clone(&duplicate_titles);
             async move {
                 if duplicate_titles.contains(&title_key(&m.title)) {
-                    m.account = pass_cli::get_item_account(&m)
-                        .await
-                        .or_else(|| fallback_duplicate_label(&m));
+                    m.account = match pass_cli::get_item_account(&m).await? {
+                        Some(account) => Some(account),
+                        None => fallback_duplicate_label(&m),
+                    };
                 }
-                m
+                Ok::<_, anyhow::Error>((index, m))
             }
         })
-        .buffered(MAX_CONCURRENT)
-        .collect::<Vec<_>>()
-        .await
+        .buffer_unordered(MAX_CONCURRENT);
+
+    // Results arrive in completion order. The first error (a session
+    // problem) is returned at once; dropping `lookups` kills the others.
+    let mut labelled = Vec::with_capacity(count);
+    while let Some(result) = lookups.next().await {
+        labelled.push(result?);
+    }
+    labelled.sort_by_key(|(index, _)| *index);
+    Ok(labelled.into_iter().map(|(_, m)| m).collect())
 }
 
 fn fallback_duplicate_label(item: &Match) -> Option<String> {
