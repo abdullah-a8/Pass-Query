@@ -96,7 +96,9 @@ fn cache_safe_item_list(items: &ItemList) -> ItemList {
                 share_id: item.share_id.clone(),
                 title: item.title.clone(),
                 item_type: item.item_type.clone(),
-                state: item.state.clone(),
+                // Lists are filtered to active items before caching, so the
+                // state adds nothing and stays out of the cache.
+                state: None,
             })
             .collect(),
     }
@@ -289,5 +291,6 @@ mod tests {
         assert!(!serialized.contains("username"));
         assert!(!serialized.contains("email"));
         assert!(!serialized.contains("content"));
+        assert!(!serialized.contains("state"));
     }
 }

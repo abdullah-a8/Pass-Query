@@ -105,6 +105,16 @@ pub struct ItemView {
 #[derive(Debug, Deserialize)]
 pub struct ItemViewItem {
     pub content: ItemViewContent,
+    /// "Active" or "Trashed", read fresh with the credentials: a cached match
+    /// may have been trashed since it was cached.
+    #[serde(default)]
+    pub state: Option<String>,
+}
+
+impl ItemViewItem {
+    pub fn is_active(&self) -> bool {
+        matches!(self.state.as_deref(), None | Some("Active"))
+    }
 }
 
 #[derive(Debug, Deserialize)]

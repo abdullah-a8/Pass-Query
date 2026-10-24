@@ -86,3 +86,19 @@ fn a_cache_from_an_older_pq_is_refetched() {
     assert_eq!(h.calls_to("vault list").len(), 1);
     assert_eq!(h.calls_to("item list").len(), 1);
 }
+
+#[test]
+fn an_item_trashed_after_it_was_cached_is_not_copied() {
+    let mut h = personal_vault();
+    assert!(h.run(&["github", "-p"]).status.success()); // cached while active
+    h.trash("item-github");
+
+    let out = h.run(&["github", "-p"]);
+
+    assert!(!out.status.success());
+    assert!(
+        stdout(&out).is_empty(),
+        "credentials of a trashed item printed"
+    );
+    assert!(stderr(&out).contains("in the trash"), "{}", stderr(&out));
+}

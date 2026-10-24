@@ -290,7 +290,7 @@ impl Harness {
             assert_only_keys(vault, &["vault_name", "login_only", "items", "timestamp"]);
             assert_only_keys(&vault["items"], &["items"]);
             for item in vault["items"]["items"].as_array().unwrap() {
-                assert_only_keys(item, &["id", "share_id", "title", "item_type", "state"]);
+                assert_only_keys(item, &["id", "share_id", "title", "item_type"]);
             }
         }
         let mut strings = Vec::new();
