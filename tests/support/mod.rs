@@ -95,6 +95,13 @@ impl Harness {
         self
     }
 
+    /// Rename a vault in Proton Pass; its share ID stays the same.
+    pub fn rename_vault(&mut self, share_id: &str, new_name: &'static str) -> &mut Self {
+        let vault = self.vaults.iter_mut().find(|(_, id)| *id == share_id);
+        vault.expect("rename an existing vault").0 = new_name;
+        self
+    }
+
     pub fn login(&mut self, share_id: &'static str, login: Login) -> &mut Self {
         self.items.push(Item {
             share_id,
@@ -119,6 +126,12 @@ impl Harness {
             content: Content::Note,
             trashed: false,
         });
+        self
+    }
+
+    /// Delete an item from Proton Pass (it disappears from every listing).
+    pub fn remove(&mut self, id: &str) -> &mut Self {
+        self.items.retain(|item| item.id != id);
         self
     }
 
@@ -180,6 +193,11 @@ impl Harness {
     /// Make fzf print `reply` instead of one of its input lines.
     pub fn picker_replies(&self, reply: &str) {
         fs::write(self.fake_dir().join("fzf-reply"), reply).unwrap();
+    }
+
+    /// The picks for successive fzf invocations: line numbers or "cancel".
+    pub fn pick_sequence(&self, picks: &[&str]) {
+        fs::write(self.fake_dir().join("fzf-picks"), picks.join("\n") + "\n").unwrap();
     }
 
     pub fn cancel_picker(&self) {
@@ -317,6 +335,13 @@ impl Harness {
             .collect()
     }
 
+    /// How many times fzf was started.
+    pub fn fzf_invocations(&self) -> usize {
+        fs::read_to_string(self.fake_dir().join("fzf-args"))
+            .map(|log| log.lines().count())
+            .unwrap_or(0)
+    }
+
     /// The arguments of the last fzf invocation, tab-separated.
     pub fn fzf_args(&self) -> Option<String> {
         let log = fs::read_to_string(self.fake_dir().join("fzf-args")).ok()?;
@@ -342,7 +367,7 @@ impl Harness {
             }
         }
         for vault in cache["vaults"].as_array().unwrap() {
-            assert_only_keys(vault, &["vault_name", "login_only", "items", "timestamp"]);
+            assert_only_keys(vault, &["vault_key", "login_only", "items", "timestamp"]);
             assert_only_keys(&vault["items"], &["items"]);
             for item in vault["items"]["items"].as_array().unwrap() {
                 assert_only_keys(item, &["id", "share_id", "title", "item_type"]);

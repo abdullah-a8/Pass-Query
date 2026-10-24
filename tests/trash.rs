@@ -92,15 +92,19 @@ fn an_item_trashed_after_it_was_cached_is_not_copied() {
     let mut h = personal_vault();
     assert!(h.run(&["github", "-p"]).status.success()); // cached while active
     h.trash("item-github");
+    h.clear_calls();
 
     let out = h.run(&["github", "-p"]);
 
+    // The fresh read refuses the trashed item, so pq searches once more on
+    // fresh data, where the item is filtered out.
     assert!(!out.status.success());
     assert!(
         stdout(&out).is_empty(),
         "credentials of a trashed item printed"
     );
-    assert!(stderr(&out).contains("in the trash"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("No items found"), "{}", stderr(&out));
+    assert_eq!(h.calls_to("item view").len(), 1, "only the refused read");
 }
 
 #[test]
@@ -120,7 +124,13 @@ fn a_cache_entry_marked_trashed_is_not_offered() {
 
     let out = h.run(&["github", "-p"]);
 
-    assert!(!out.status.success());
-    assert!(stderr(&out).contains("No items found"));
-    assert!(h.calls_to("item view").is_empty());
+    // The cached entry is not offered; pq refetches, and Proton Pass says the
+    // item is active.
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(
+        h.calls_to("item list").len(),
+        1,
+        "refetched, not served from the cache"
+    );
+    assert_eq!(stdout(&out), "Username: octocat\nPassword: github-secret\n");
 }

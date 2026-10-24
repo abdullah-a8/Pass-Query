@@ -16,7 +16,14 @@ if [ -f "$dir/fzf-reply" ]; then
     cat "$dir/fzf-reply"
     exit 0
 fi
-pick=$(cat "$dir/fzf-pick" 2>/dev/null || echo 1)
+# fzf-picks, when present, holds one pick per line, used one per invocation.
+if [ -s "$dir/fzf-picks" ]; then
+    pick=$(sed -n 1p "$dir/fzf-picks")
+    sed 1d "$dir/fzf-picks" >"$dir/fzf-picks.rest"
+    cat "$dir/fzf-picks.rest" >"$dir/fzf-picks"
+else
+    pick=$(cat "$dir/fzf-pick" 2>/dev/null || echo 1)
+fi
 if [ "$pick" = cancel ]; then
     exit 130
 fi
