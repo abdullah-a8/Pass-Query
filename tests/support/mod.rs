@@ -425,6 +425,11 @@ impl Harness {
         fs::write(self.fake_dir().join("clipboard-fail"), "").unwrap();
     }
 
+    /// Make every copy leave a process behind, as wl-copy and xclip do.
+    pub fn linger_after_copy(&self) {
+        fs::write(self.fake_dir().join("clipboard-linger"), "").unwrap();
+    }
+
     /// Replace the clipboard's contents, as another application would.
     pub fn set_clipboard(&self, text: &str) {
         fs::write(self.fake_dir().join("clipboard-now"), text).unwrap();

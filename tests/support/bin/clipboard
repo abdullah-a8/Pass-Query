@@ -25,6 +25,11 @@ copy() {
     printf '%s' "$args" >"$dir/clipboard/$n.args"
     cat >"$dir/clipboard/$n.txt"
     cp "$dir/clipboard/$n.txt" "$now"
+    # clipboard-linger: stay behind serving the selection, as wl-copy and
+    # xclip do, holding on to the stderr pq gave this tool.
+    if [ -f "$dir/clipboard-linger" ]; then
+        sleep 5 &
+    fi
 }
 
 paste() {

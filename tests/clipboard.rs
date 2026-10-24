@@ -91,6 +91,23 @@ fn a_failing_clipboard_tool_stops_pq_before_the_password() {
 }
 
 #[test]
+fn a_clipboard_tool_left_serving_the_selection_does_not_hold_pq_output_open() {
+    let h = harness();
+    h.linger_after_copy();
+
+    let started = std::time::Instant::now();
+    let out = h.run(&["wifi", "--clear-after", "0"]);
+
+    // run() reads stdout and stderr to the end, as a script capturing them would.
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert!(
+        started.elapsed() < 3 * SECOND,
+        "took {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
 fn print_mode_never_touches_the_clipboard() {
     let h = harness();
 

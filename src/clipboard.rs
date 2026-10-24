@@ -98,9 +98,12 @@ impl Clipboard {
         let mut child = Command::new(program)
             .args(args)
             .stdin(Stdio::piped())
-            // xclip and xsel keep serving the selection in the background;
-            // they must not hold on to pq's stdout.
+            // wl-copy, xclip and xsel fork to keep serving the selection in
+            // the background; they must not hold on to pq's stdout or stderr,
+            // or a script reading pq's output waits for them. pq reports a
+            // failure from the exit status instead.
             .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
             .with_context(|| {
                 format!(
