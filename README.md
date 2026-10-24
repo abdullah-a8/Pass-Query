@@ -16,7 +16,7 @@
 - [pass-cli](https://protonpass.github.io/pass-cli/) installed and logged in (`pass-cli login`)
 - [fzf](https://github.com/junegunn/fzf) for fuzzy selection (`brew install fzf` on macOS, `sudo apt install fzf` on Linux)
 - A clipboard tool: `pbcopy` (built into macOS) or [wl-clipboard](https://github.com/bugaevc/wl-clipboard) / `wl-copy` on Linux/Wayland
-- Rust 1.85+ (for building from source)
+- Rust 1.88+ (for building from source)
 
 ## Installation
 
