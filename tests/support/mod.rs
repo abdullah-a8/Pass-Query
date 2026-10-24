@@ -420,6 +420,11 @@ impl Harness {
         fs::read_to_string(self.fake_dir().join("clipboard-now")).unwrap_or_default()
     }
 
+    /// Make every copy to the clipboard fail.
+    pub fn fail_clipboard(&self) {
+        fs::write(self.fake_dir().join("clipboard-fail"), "").unwrap();
+    }
+
     /// Replace the clipboard's contents, as another application would.
     pub fn set_clipboard(&self, text: &str) {
         fs::write(self.fake_dir().join("clipboard-now"), text).unwrap();

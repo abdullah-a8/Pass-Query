@@ -73,6 +73,23 @@ fn an_item_without_username_copies_the_password_without_a_prompt() {
 }
 
 #[test]
+fn a_failing_clipboard_tool_stops_pq_before_the_password() {
+    let h = harness();
+    h.fail_clipboard();
+
+    let out = h.run(&["github"]);
+
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("wl-copy failed"), "{err}");
+    assert!(!err.contains("copied"), "{err}");
+    assert!(!err.contains("github-secret"), "{err}");
+    assert!(stdout(&out).is_empty());
+    assert!(h.copied_texts().is_empty());
+    assert_eq!(h.clipboard_now(), "");
+}
+
+#[test]
 fn print_mode_never_touches_the_clipboard() {
     let h = harness();
 

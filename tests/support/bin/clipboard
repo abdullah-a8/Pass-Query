@@ -13,6 +13,12 @@ now="$dir/clipboard-now"
 args="$*"
 
 copy() {
+    # clipboard-fail makes every copy fail, as with no clipboard owner.
+    if [ -f "$dir/clipboard-fail" ]; then
+        cat >/dev/null
+        echo "$tool: cannot open display" >&2
+        exit 1
+    fi
     mkdir -p "$dir/clipboard"
     n=$(find "$dir/clipboard" -name '*.txt' | wc -l | tr -d ' ')
     printf '%s' "$tool" >"$dir/clipboard/$n.tool"
