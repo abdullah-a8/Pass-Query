@@ -22,8 +22,23 @@ fn run_pq() -> Harness {
     h
 }
 
+/// Whether this system lets a process have core dumps at all; the harness
+/// raises pq's limit to the hard limit, so with a hard limit of zero the test
+/// below would pass whatever pq did.
+fn core_dumps_possible() -> bool {
+    let out = std::process::Command::new("/bin/sh")
+        .args(["-c", "ulimit -H -c"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim() != "0"
+}
+
 #[test]
 fn pq_turns_core_dumps_off() {
+    if !core_dumps_possible() {
+        eprintln!("skipped: the hard core limit is already 0 here");
+        return;
+    }
     let h = run_pq();
 
     // pass-cli inherits pq's limit.

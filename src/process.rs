@@ -1,10 +1,14 @@
 //! pq holds passwords in memory. This keeps that memory out of core files
 //! and away from the user's other processes.
 
-/// Turn core dumps off for pq and everything it starts, and on Linux make pq
-/// non-dumpable, which also stops other processes of the same user from
-/// reading its memory through /proc or attaching a debugger. Best effort: pq
-/// runs on if the system refuses.
+/// Protect pq's own memory: on Linux, make pq non-dumpable, so the kernel
+/// writes no core dump of it (to a file or a dump handler) and other
+/// processes of the same user cannot read its memory through /proc or attach
+/// a debugger; and set the core size limit to zero, which also stops
+/// file-based core dumps on macOS. Programs pq starts (pass-cli, fzf, the
+/// clipboard tools) inherit the zero limit, but Linux makes them dumpable
+/// again when they start, and a dump handler ignores the limit: their memory
+/// is theirs to protect. Best effort: pq runs on if the system refuses.
 pub fn protect_memory() {
     let no_core = libc::rlimit {
         rlim_cur: 0,
