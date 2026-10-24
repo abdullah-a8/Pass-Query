@@ -100,7 +100,7 @@ pub async fn search_all_vaults_limited(
     );
     pb.set_message("Searching vaults");
 
-    let results = stream::iter(vaults)
+    let mut searches = stream::iter(vaults)
         .map(|vault| {
             let query = query.clone();
             let pb = pb.clone();
@@ -110,29 +110,26 @@ pub async fn search_all_vaults_limited(
                 result
             }
         })
-        .buffer_unordered(MAX_CONCURRENT)
-        .collect::<Vec<_>>()
-        .await;
-
-    // Clear progress bar
-    pb.finish_and_clear();
+        .buffer_unordered(MAX_CONCURRENT);
 
     let mut all_matches = Vec::new();
     let mut failures = Vec::new();
-    for result in results {
+    while let Some(result) = searches.next().await {
         match result {
             Ok(matches) => all_matches.extend(matches),
-            Err(e) => failures.push(e),
+            // A session problem affects every vault: report it at once, with
+            // its fix. Dropping `searches` cancels (and kills) the others.
+            Err(e) => {
+                if let Some(problem) = e.downcast_ref::<pass_cli::SessionProblem>() {
+                    pb.finish_and_clear();
+                    return Err(anyhow::Error::new(*problem));
+                }
+                failures.push(e);
+            }
         }
     }
+    pb.finish_and_clear();
 
-    // A session problem affects every vault: report it once, with its fix.
-    if let Some(problem) = failures
-        .iter()
-        .find_map(|e| e.downcast_ref::<pass_cli::SessionProblem>())
-    {
-        return Err(anyhow::Error::new(*problem));
-    }
     // With no vault searched, "no items found" would be misleading.
     if !failures.is_empty() && failures.len() as u64 == vault_count {
         anyhow::bail!(
@@ -169,7 +166,7 @@ fn duplicate_title_keys(matches: &[Match]) -> HashSet<String> {
 
 /// Populate account identifiers only when the visible title is ambiguous.
 /// The labels are fetched for the picker, kept in memory, and never cached.
-pub async fn enrich_duplicate_titles_with_accounts(matches: Vec<Match>) -> Vec<Match> {
+pub async fn enrich_duplicate_titles_with_accounts(matches: Vec<Match>) -> Result<Vec<Match>> {
     const MAX_CONCURRENT: usize = 10;
     let duplicate_titles = Arc::new(duplicate_title_keys(&matches));
 
@@ -178,16 +175,19 @@ pub async fn enrich_duplicate_titles_with_accounts(matches: Vec<Match>) -> Vec<M
             let duplicate_titles = Arc::clone(&duplicate_titles);
             async move {
                 if duplicate_titles.contains(&title_key(&m.title)) {
-                    m.account = pass_cli::get_item_account(&m)
-                        .await
-                        .or_else(|| fallback_duplicate_label(&m));
+                    m.account = match pass_cli::get_item_account(&m).await? {
+                        Some(account) => Some(account),
+                        None => fallback_duplicate_label(&m),
+                    };
                 }
-                m
+                Ok(m)
             }
         })
         .buffered(MAX_CONCURRENT)
-        .collect::<Vec<_>>()
+        .collect::<Vec<Result<Match>>>()
         .await
+        .into_iter()
+        .collect()
 }
 
 fn fallback_duplicate_label(item: &Match) -> Option<String> {

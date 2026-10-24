@@ -130,3 +130,52 @@ fn every_vault_failing_is_reported_as_an_error_not_as_no_match() {
     assert!(err.contains("NotFound"), "{err}");
     assert!(!err.contains("No items found"), "{err}");
 }
+
+#[test]
+fn a_locked_session_while_labelling_duplicate_titles_gives_an_unlock_hint() {
+    let mut h = personal_vault();
+    h.vault("Work", "share-work").login(
+        "share-work",
+        Login {
+            id: "item-github-work",
+            ..GITHUB
+        },
+    );
+    h.pick(1);
+    assert!(h.run(&["github", "-p"]).status.success()); // caches both lists
+    h.clear_calls();
+    h.fail("item-view", LOCKED);
+
+    let out = h.run(&["github", "-p"]);
+
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("pass-cli session unlock"), "{err}");
+    assert!(
+        h.fzf_input().is_none(),
+        "picker opened despite the locked session"
+    );
+}
+
+#[test]
+fn a_session_problem_is_reported_without_waiting_for_slow_vaults() {
+    let mut h = personal_vault();
+    h.vault("Slow", "share-slow");
+    h.fail_vault("share-personal", LOCKED);
+    h.slow_vault("share-slow", 10);
+
+    let started = std::time::Instant::now();
+    let out = h.run(&["github", "-p"]);
+    let took = started.elapsed();
+
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("pass-cli session unlock"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        took < std::time::Duration::from_secs(5),
+        "waited {took:?} for a slow vault"
+    );
+}

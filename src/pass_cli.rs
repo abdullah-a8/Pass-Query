@@ -20,10 +20,13 @@ pub enum SessionProblem {
 impl SessionProblem {
     fn from_stderr(stderr: &str) -> Option<Self> {
         let s = stderr.to_lowercase();
-        if s.contains("session is locked") || s.contains("sessionlocked") {
-            Some(Self::Locked)
-        } else if s.contains("session has been invalidated") {
+        // An ended session wins: pass-cli can print a lock diagnostic early
+        // (during startup telemetry) and then exit because the session was
+        // invalidated, and unlocking an ended session does not help.
+        if s.contains("session has been invalidated") {
             Some(Self::Invalidated)
+        } else if s.contains("session is locked") || s.contains("sessionlocked") {
+            Some(Self::Locked)
         } else if s.contains("requires an authenticated client")
             || s.contains("no session")
             || s.contains("not logged in")
@@ -111,8 +114,10 @@ pub async fn list_vault_items(vault: &Vault, login_only: bool) -> Result<ItemLis
         args.push(vault.name.clone());
     }
 
+    // Killed if the search is abandoned (e.g. on a session problem elsewhere).
     let output = Command::new("pass-cli")
         .args(args)
+        .kill_on_drop(true)
         .output()
         .await
         .context(format!(
@@ -141,14 +146,15 @@ pub async fn list_vault_items(vault: &Vault, login_only: bool) -> Result<ItemLis
 /// Fetch only the account identifier (username, falling back to email) for an item
 /// using `pass-cli item view --field`. This reads a single field and never retrieves
 /// the password, so it is safe to call for every match shown in the picker.
-/// Returns `None` if the item has neither a username nor an email (e.g. a note).
-pub async fn get_item_account(item: &Match) -> Option<String> {
+/// Returns `None` if the item has neither a username nor an email (e.g. a note),
+/// and an error only for a session problem, which the user has to fix.
+pub async fn get_item_account(item: &Match) -> Result<Option<String>> {
     for field in ["username", "email"] {
-        if let Some(value) = view_single_field(item, field).await {
-            return Some(value);
+        if let Some(value) = view_single_field(item, field).await? {
+            return Ok(Some(value));
         }
     }
-    None
+    Ok(None)
 }
 
 fn item_view_args(item: &Match) -> Vec<String> {
@@ -170,25 +176,30 @@ fn item_view_args(item: &Match) -> Vec<String> {
 }
 
 /// Run `pass-cli item view ... --field <field>`, which prints the raw field value.
-/// Returns `None` on failure or when the field is absent/empty (pass-cli exits
-/// non-zero for a field that isn't set on the item).
-async fn view_single_field(item: &Match, field: &str) -> Option<String> {
+/// `None` when the field is absent or empty (pass-cli exits non-zero for a field
+/// that isn't set) or the read fails for another reason: the picker then falls
+/// back to another label. A session problem is returned as the error.
+async fn view_single_field(item: &Match, field: &str) -> Result<Option<String>> {
     let mut args = item_view_args(item);
     args.extend(["--field".to_string(), field.to_string()]);
 
-    let output = Command::new("pass-cli").args(args).output().await.ok()?;
+    let output = Command::new("pass-cli")
+        .args(args)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .context("Failed to execute pass-cli item view")?;
 
     if !output.status.success() {
-        return None;
+        return match failure("pass-cli item view", &output.stderr).downcast::<SessionProblem>() {
+            Ok(problem) => Err(problem.into()),
+            Err(_) => Ok(None),
+        };
     }
 
-    let value = String::from_utf8(output.stdout).ok()?;
+    let value = String::from_utf8_lossy(&output.stdout);
     let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
+    Ok((!trimmed.is_empty()).then(|| trimmed.to_string()))
 }
 
 /// Get both username and password in ONE call using `pass-cli item view --output json`
@@ -280,6 +291,19 @@ mod tests {
         for (stderr, expected) in cases {
             assert_eq!(SessionProblem::from_stderr(stderr), expected, "{stderr}");
         }
+    }
+
+    #[test]
+    fn an_ended_session_wins_over_an_earlier_lock_diagnostic() {
+        // pass-cli can report the lock during startup telemetry, then exit
+        // because the session was invalidated: the session has ended.
+        let stderr = "Session is locked. Please unlock your session and try again.\n\
+            Your session has been invalidated and you have been logged out automatically.\n\
+            Please log in again with: pass login";
+        assert_eq!(
+            SessionProblem::from_stderr(stderr),
+            Some(SessionProblem::Invalidated)
+        );
     }
 
     #[test]

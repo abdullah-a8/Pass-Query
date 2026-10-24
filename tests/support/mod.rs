@@ -17,7 +17,7 @@ const FAKE_PASS_CLI: &str = include_str!("bin/pass-cli");
 const FAKE_FZF: &str = include_str!("bin/fzf");
 const FAKE_CLIPBOARD: &str = include_str!("bin/clipboard");
 /// The external commands the fake tools run.
-const FAKE_UTILS: [&str; 6] = ["cat", "find", "mkdir", "sed", "tr", "wc"];
+const FAKE_UTILS: [&str; 7] = ["cat", "find", "mkdir", "sed", "sleep", "tr", "wc"];
 
 #[derive(Clone)]
 pub struct Login {
@@ -124,6 +124,17 @@ impl Harness {
         let dir = self.fake_dir().join("fail");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(format!("item-list.{share_id}")), stderr).unwrap();
+    }
+
+    /// Make `pass-cli item list` for one vault take `seconds` to answer.
+    pub fn slow_vault(&self, share_id: &str, seconds: u32) {
+        let dir = self.fake_dir().join("delay");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(format!("item-list.{share_id}")),
+            seconds.to_string(),
+        )
+        .unwrap();
     }
 
     /// Choose the 1-based picker line fzf returns.
@@ -248,8 +259,11 @@ impl Harness {
             .collect()
     }
 
+    /// Forget the pass-cli calls and fzf invocations recorded so far.
     pub fn clear_calls(&self) {
-        let _ = fs::remove_file(self.fake_dir().join("calls"));
+        for log in ["calls", "fzf-input", "fzf-args"] {
+            let _ = fs::remove_file(self.fake_dir().join(log));
+        }
     }
 
     /// Everything copied to the clipboard, in order, with the arguments of each copy.

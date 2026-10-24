@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
     // Only duplicate visible titles need account identifiers in the picker.
     // These labels are kept in memory and never written to the cache.
     if matches.len() > 1 {
-        matches = search::enrich_duplicate_titles_with_accounts(matches).await;
+        matches = search::enrich_duplicate_titles_with_accounts(matches).await?;
     }
 
     // Handle selection with fzf

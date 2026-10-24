@@ -50,6 +50,10 @@ item-list)
     [ "$output" = json ] || unsupported "item list without --output json"
     [ -n "$share" ] || unsupported "item list without --share-id"
     [ -z "$filter" ] || [ "$filter" = login ] || unsupported "item list --filter-type $filter"
+    # delay/item-list.<share-id> holds seconds to wait first (a slow vault).
+    if [ -f "$dir/delay/item-list.$share" ]; then
+        sleep "$(cat "$dir/delay/item-list.$share")"
+    fi
     if [ -f "$dir/fail/item-list.$share" ]; then
         cat "$dir/fail/item-list.$share" >&2
         exit 1
