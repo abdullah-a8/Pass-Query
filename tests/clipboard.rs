@@ -5,7 +5,7 @@
 mod support;
 
 use std::time::Duration;
-use support::{Display, Harness, Login, eventually, stderr, stdout};
+use support::{Harness, Login, eventually, stderr, stdout};
 
 const GITHUB: Login = Login {
     id: "item-github",
@@ -81,7 +81,8 @@ fn a_failing_clipboard_tool_stops_pq_before_the_password() {
 
     assert!(!out.status.success());
     let err = stderr(&out);
-    assert!(err.contains("wl-copy failed"), "{err}");
+    // wl-copy on Linux, pbcopy on macOS.
+    assert!(err.contains(" failed (exit status: 1)"), "{err}");
     assert!(!err.contains("copied"), "{err}");
     assert!(!err.contains("github-secret"), "{err}");
     assert!(stdout(&out).is_empty());
@@ -102,6 +103,7 @@ fn print_mode_never_touches_the_clipboard() {
 #[cfg(not(target_os = "macos"))]
 mod linux {
     use super::*;
+    use crate::support::Display;
 
     fn copy_tools(h: &Harness) -> Vec<(String, String)> {
         h.copies().into_iter().map(|c| (c.tool, c.args)).collect()
