@@ -187,28 +187,45 @@ fn is_private(meta: &fs::Metadata) -> bool {
 /// beside it, which is then renamed over it: a reader never sees a partial
 /// file, and a link planted at the cache path is replaced, not followed.
 fn write_cache_file(cache_path: &Path, cache_json: &str) -> Result<()> {
-    static WRITES: AtomicUsize = AtomicUsize::new(0);
     let dir = cache_path.parent().context("Cache path has no directory")?;
-    let temp = dir.join(format!(
-        ".vault-cache.{}.{}.tmp",
-        std::process::id(),
-        WRITES.fetch_add(1, Ordering::Relaxed)
-    ));
+    let (temp, mut file) = create_temp_file(dir).context("Failed to write cache file")?;
+    let written = file
+        .write_all(cache_json.as_bytes())
+        .and_then(|()| file.sync_all())
+        .and_then(|()| fs::rename(&temp, cache_path));
+    if written.is_err() {
+        // Only ever the file this run created.
+        let _ = fs::remove_file(&temp);
+    }
+    written.context("Failed to write cache file")
+}
 
-    let written = (|| -> std::io::Result<()> {
+/// Cache writes by this process, numbering its temporary files.
+static WRITES: AtomicUsize = AtomicUsize::new(0);
+
+/// A new 0600 file beside the cache, under a name no one else holds: a name
+/// left by a crashed pq, or taken by a concurrent writer, is skipped, never
+/// reused or removed.
+fn create_temp_file(dir: &Path) -> std::io::Result<(PathBuf, fs::File)> {
+    let mut attempts = 0;
+    loop {
+        let temp = dir.join(format!(
+            ".vault-cache.{}.{}.tmp",
+            std::process::id(),
+            WRITES.fetch_add(1, Ordering::Relaxed)
+        ));
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
         options.mode(0o600);
-        let mut file = options.open(&temp)?;
-        file.write_all(cache_json.as_bytes())?;
-        file.sync_all()?;
-        fs::rename(&temp, cache_path)
-    })();
-    if written.is_err() {
-        let _ = fs::remove_file(&temp);
+        match options.open(&temp) {
+            Ok(file) => return Ok((temp, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempts < 16 => {
+                attempts += 1;
+            }
+            Err(e) => return Err(e),
+        }
     }
-    written.context("Failed to write cache file")
 }
 
 /// The cache to update, and its directory made ready for the write. The
@@ -310,6 +327,30 @@ pub fn set_cached_vault_list(vaults: &VaultList) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_taken_temporary_name_is_skipped_and_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        // Left by a crashed pq with this pid, or by another writer.
+        let next = WRITES.load(Ordering::Relaxed);
+        let taken: Vec<_> = (next..next + 4)
+            .map(|n| {
+                dir.path()
+                    .join(format!(".vault-cache.{}.{n}.tmp", std::process::id()))
+            })
+            .collect();
+        for path in &taken {
+            fs::write(path, "someone else's").unwrap();
+        }
+        let cache = dir.path().join("vault-cache.json");
+
+        write_cache_file(&cache, "{}").unwrap();
+
+        assert_eq!(fs::read_to_string(&cache).unwrap(), "{}");
+        for path in &taken {
+            assert_eq!(fs::read_to_string(path).unwrap(), "someone else's");
+        }
+    }
 
     #[test]
     fn cache_safe_item_list_keeps_only_search_metadata() {

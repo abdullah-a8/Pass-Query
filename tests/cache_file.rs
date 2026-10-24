@@ -163,7 +163,7 @@ fn a_cache_directory_reached_through_a_link_is_not_used() {
         .unwrap()
         .join("elsewhere");
     fs::create_dir_all(&real).unwrap();
-    fs::set_permissions(&real, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&real, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(real.join("vault-cache.json"), substituted_cache()).unwrap();
     fs::set_permissions(
         real.join("vault-cache.json"),
@@ -173,4 +173,6 @@ fn a_cache_directory_reached_through_a_link_is_not_used() {
     std::os::unix::fs::symlink(&real, h.cache_file().parent().unwrap()).unwrap();
 
     assert_cache_ignored(&h);
+    // The linked directory may be shared; pq must not lock others out of it.
+    assert_eq!(mode(&real), 0o755);
 }
