@@ -17,6 +17,19 @@ printf '%s\n' "$record" >>"$dir/calls"
 
 command="${1:-}-${2:-}"
 
+# What a process pq starts can see of pq: the core file size limit it
+# inherited and, on Linux, whether pq's environment is readable through /proc
+# (it is not once pq has made itself non-dumpable).
+probe="core=$(ulimit -c)"
+if [ -e "/proc/$PPID/environ" ]; then
+    if cat "/proc/$PPID/environ" >/dev/null 2>&1; then
+        probe="$probe proc=readable"
+    else
+        probe="$probe proc=protected"
+    fi
+fi
+printf '%s\n' "$probe" >"$dir/probe"
+
 # The log levels pass-cli was started with. With debug logging on, real
 # pass-cli (through its HTTP library) logs whole requests, bearer token
 # included, to stderr; the fake does the same so tests can prove pq never
