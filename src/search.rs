@@ -42,18 +42,30 @@ fn title_key(title: &str) -> String {
     title.trim().to_lowercase()
 }
 
+/// The key a vault's item list is cached under: its share ID, which never
+/// changes, so a renamed vault cannot lend its list to another vault that
+/// now has its name. The name is a fallback for a pass-cli that gives none.
+fn cache_key(vault: &Vault) -> String {
+    match &vault.share_id {
+        Some(share_id) => format!("share:{share_id}"),
+        None => format!("name:{}", vault.name),
+    }
+}
+
 /// Which cached item lists a search may use.
 pub enum CacheUse {
     /// Any list cached within the last day.
     Any,
-    /// Only the lists of these vaults (those fetched earlier in this run).
+    /// Only the lists of these vaults, by `cache_key` (those fetched earlier
+    /// in this run).
     OnlyVaults(HashSet<String>),
     /// None: fetch every list from pass-cli.
     Never,
 }
 
 /// The matches of one search, whether any of them came from the cache (and
-/// so may be out of date), and the vaults whose lists were fetched fresh.
+/// so may be out of date), and the vaults (by `cache_key`) whose lists were
+/// fetched fresh.
 pub struct SearchResults {
     pub matches: Vec<Match>,
     pub from_cache: bool,
@@ -71,10 +83,11 @@ async fn search_vault(
 ) -> Result<(Vec<Match>, bool)> {
     // Cached lists were filtered when written; filtering again keeps a cache
     // edited by hand or by another tool from offering trashed items.
+    let key = cache_key(&vault);
     let cached = match cache_use {
-        CacheUse::Any => cache::get_cached_vault(&vault.name, login_only),
-        CacheUse::OnlyVaults(names) if names.contains(&vault.name) => {
-            cache::get_cached_vault(&vault.name, login_only)
+        CacheUse::Any => cache::get_cached_vault(&key, login_only),
+        CacheUse::OnlyVaults(keys) if keys.contains(&key) => {
+            cache::get_cached_vault(&key, login_only)
         }
         _ => None,
     };
@@ -85,7 +98,7 @@ async fn search_vault(
             let items = pass_cli::list_vault_items(&vault, login_only)
                 .await?
                 .into_active();
-            let _ = cache::set_cached_vault(&vault.name, login_only, &items);
+            let _ = cache::set_cached_vault(&key, login_only, &items);
             items
         }
     };
@@ -140,10 +153,10 @@ pub async fn search_all_vaults_limited(
             let pb = pb.clone();
             let cache_use = &cache_use;
             async move {
-                let name = vault.name.clone();
+                let key = cache_key(&vault);
                 let result = search_vault(vault, query, login_only, cache_use).await;
                 pb.inc(1);
-                (name, result)
+                (key, result)
             }
         })
         .buffer_unordered(MAX_CONCURRENT);
@@ -152,13 +165,13 @@ pub async fn search_all_vaults_limited(
     let mut from_cache = false;
     let mut fetched_vaults = HashSet::new();
     let mut failures = Vec::new();
-    while let Some((name, result)) = searches.next().await {
+    while let Some((key, result)) = searches.next().await {
         match result {
             Ok((matches, cached)) => {
                 all_matches.extend(matches);
                 from_cache |= cached;
                 if !cached {
-                    fetched_vaults.insert(name);
+                    fetched_vaults.insert(key);
                 }
             }
             // A session problem affects every vault: report it at once, with

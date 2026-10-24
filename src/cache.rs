@@ -17,12 +17,14 @@ const MAX_AGE_SECONDS: u64 = 24 * 60 * 60;
 
 /// Bumped whenever cached contents change meaning, so caches written by an
 /// older pq are discarded instead of misread. 2: item lists exclude trashed
-/// items.
-const CACHE_FORMAT_VERSION: u32 = 2;
+/// items. 3: item lists are keyed by the vault's share ID, not its name,
+/// which can move to another vault.
+const CACHE_FORMAT_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct CachedVault {
-    vault_name: String,
+    /// `search::cache_key` of the vault: its share ID when pass-cli gives one.
+    vault_key: String,
     #[serde(default)]
     login_only: bool,
     items: ItemList,
@@ -138,7 +140,7 @@ fn write_cache_file(cache_path: &PathBuf, cache_json: &str) -> Result<()> {
 }
 
 /// A vault's cached item list, if one was written within the last day.
-pub fn get_cached_vault(vault_name: &str, login_only: bool) -> Option<ItemList> {
+pub fn get_cached_vault(vault_key: &str, login_only: bool) -> Option<ItemList> {
     let cache_path = get_cache_path().ok()?;
     if !cache_path.exists() {
         return None;
@@ -148,7 +150,7 @@ pub fn get_cached_vault(vault_name: &str, login_only: bool) -> Option<ItemList> 
     let cache = parse_cache(&cache_data)?;
 
     for cached_vault in cache.vaults {
-        if cached_vault.vault_name == vault_name {
+        if cached_vault.vault_key == vault_key {
             let exact_scope = cached_vault.login_only == login_only;
             let broader_all_scope = login_only && !cached_vault.login_only;
             if !(exact_scope || broader_all_scope) {
@@ -163,7 +165,7 @@ pub fn get_cached_vault(vault_name: &str, login_only: bool) -> Option<ItemList> 
     None
 }
 
-pub fn set_cached_vault(vault_name: &str, login_only: bool, items: &ItemList) -> Result<()> {
+pub fn set_cached_vault(vault_key: &str, login_only: bool, items: &ItemList) -> Result<()> {
     let cache_path = get_cache_path()?;
 
     // Create cache directory if it doesn't exist
@@ -188,7 +190,7 @@ pub fn set_cached_vault(vault_name: &str, login_only: bool, items: &ItemList) ->
     // Update or add this vault's cache
     let mut found = false;
     for cached_vault in &mut cache.vaults {
-        if cached_vault.vault_name == vault_name && cached_vault.login_only == login_only {
+        if cached_vault.vault_key == vault_key && cached_vault.login_only == login_only {
             cached_vault.items = items_to_cache.clone();
             cached_vault.timestamp = timestamp;
             found = true;
@@ -198,7 +200,7 @@ pub fn set_cached_vault(vault_name: &str, login_only: bool, items: &ItemList) ->
 
     if !found {
         cache.vaults.push(CachedVault {
-            vault_name: vault_name.to_string(),
+            vault_key: vault_key.to_string(),
             login_only,
             items: items_to_cache,
             timestamp,

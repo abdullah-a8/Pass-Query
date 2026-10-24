@@ -50,10 +50,10 @@ fn now() -> u64 {
 fn cache_of_github(age: u64) -> String {
     let ts = now() - age;
     serde_json::json!({
-        "version": 2,
+        "version": 3,
         "vault_list": { "vaults": { "vaults": [{ "name": "Personal", "share_id": "share-personal" }] }, "timestamp": ts },
         "vaults": [{
-            "vault_name": "Personal", "login_only": true, "timestamp": ts,
+            "vault_key": "share:share-personal", "login_only": true, "timestamp": ts,
             "items": { "items": [{ "id": "item-github", "share_id": "share-personal",
                                     "title": "github", "item_type": "login", "state": "Active" }] }
         }]
@@ -205,7 +205,7 @@ fn an_empty_cached_vault_list_is_checked_again_before_saying_there_are_no_vaults
     let h = personal_vault();
     h.write_cache(
         &serde_json::json!({
-            "version": 2,
+            "version": 3,
             "vault_list": { "vaults": { "vaults": [] }, "timestamp": now() },
             "vaults": []
         })
@@ -217,4 +217,58 @@ fn an_empty_cached_vault_list_is_checked_again_before_saying_there_are_no_vaults
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     assert_eq!(h.calls_to("vault list").len(), 1);
     assert_eq!(stdout(&out), "Username: octocat\nPassword: github-secret\n");
+}
+
+/// Make the cached vault list (only) look a day old, so the next run
+/// fetches it again while the cached item lists stay fresh.
+fn expire_cached_vault_list(h: &Harness) {
+    let cache = std::fs::read_to_string(h.cache_file()).unwrap();
+    let mut cache: serde_json::Value = serde_json::from_str(&cache).unwrap();
+    cache["vault_list"]["timestamp"] = (now() - 25 * HOUR).into();
+    h.write_cache(&cache.to_string());
+}
+
+#[test]
+fn a_vault_renamed_since_caching_never_lends_its_items_to_a_new_vault_of_that_name() {
+    let mut h = Harness::new();
+    h.vault("Personal", "share-old").login(
+        "share-old",
+        Login {
+            id: "item-old",
+            password: "old-secret",
+            ..GITHUB
+        },
+    );
+    assert!(h.run(&["github", "-p"]).status.success()); // caches share-old's list
+    expire_cached_vault_list(&h);
+    // "Personal" is now another vault; the old one is called "Old".
+    h.rename_vault("share-old", "Old")
+        .vault("Personal", "share-new")
+        .login(
+            "share-new",
+            Login {
+                id: "item-gitea",
+                title: "gitea",
+                ..GITHUB
+            },
+        );
+    h.clear_calls();
+    h.pick(1);
+
+    let out = h.run(&["git", "-p"]);
+
+    // Both vaults are searched under their current names; the old vault's
+    // items are not shown as "Personal".
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let picker = h.fzf_input().expect("two matches");
+    assert!(picker.contains("[Old] github"), "{picker}");
+    assert!(picker.contains("[Personal] gitea"), "{picker}");
+    assert!(!picker.contains("[Personal] github"), "{picker}");
+    let lists = h.calls_to("item list");
+    assert!(
+        lists
+            .iter()
+            .any(|call| has_arg(call, "--share-id=share-new")),
+        "the new vault was never listed: {lists:?}"
+    );
 }
