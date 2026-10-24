@@ -1,0 +1,341 @@
+//! End-to-end harness: runs the real `pq` binary against fake `pass-cli`,
+//! `fzf` and clipboard tools placed first on `PATH`.
+//!
+//! A test describes vaults and items, runs pq, then inspects what pq did: the
+//! pass-cli calls it made, what it showed fzf, what it copied and what it
+//! cached. The JSON written for the fake follows pass-cli 2.5.1.
+
+#![allow(dead_code)] // each test binary uses a different subset
+
+use serde_json::{Value, json};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+use tempfile::TempDir;
+
+const FAKE_PASS_CLI: &str = include_str!("bin/pass-cli");
+const FAKE_FZF: &str = include_str!("bin/fzf");
+const FAKE_CLIPBOARD: &str = include_str!("bin/clipboard");
+
+#[derive(Clone)]
+pub struct Login {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub username: &'static str,
+    pub email: &'static str,
+    pub password: &'static str,
+}
+
+#[derive(Clone)]
+enum Content {
+    Login(Login),
+    Note,
+}
+
+#[derive(Clone)]
+struct Item {
+    share_id: &'static str,
+    id: &'static str,
+    title: &'static str,
+    content: Content,
+}
+
+pub struct Harness {
+    root: TempDir,
+    vaults: Vec<(&'static str, &'static str)>,
+    items: Vec<Item>,
+}
+
+impl Harness {
+    pub fn new() -> Self {
+        let root = tempfile::tempdir().expect("create temp dir");
+        let harness = Self {
+            root,
+            vaults: Vec::new(),
+            items: Vec::new(),
+        };
+        for dir in [harness.bin_dir(), harness.fake_dir(), harness.home_dir()] {
+            fs::create_dir_all(dir).expect("create harness dir");
+        }
+        harness.install("pass-cli", FAKE_PASS_CLI);
+        harness.install("fzf", FAKE_FZF);
+        harness.install("wl-copy", FAKE_CLIPBOARD);
+        harness.install("pbcopy", FAKE_CLIPBOARD);
+        harness
+    }
+
+    pub fn vault(&mut self, name: &'static str, share_id: &'static str) -> &mut Self {
+        self.vaults.push((name, share_id));
+        self
+    }
+
+    pub fn login(&mut self, share_id: &'static str, login: Login) -> &mut Self {
+        self.items.push(Item {
+            share_id,
+            id: login.id,
+            title: login.title,
+            content: Content::Login(login),
+        });
+        self
+    }
+
+    pub fn note(
+        &mut self,
+        share_id: &'static str,
+        id: &'static str,
+        title: &'static str,
+    ) -> &mut Self {
+        self.items.push(Item {
+            share_id,
+            id,
+            title,
+            content: Content::Note,
+        });
+        self
+    }
+
+    /// Make `pass-cli <command>` (e.g. "vault-list") print `stderr` and exit 1.
+    pub fn fail(&self, command: &str, stderr: &str) {
+        let dir = self.fake_dir().join("fail");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(command), stderr).unwrap();
+    }
+
+    /// Make `pass-cli item list` fail for one vault only.
+    pub fn fail_vault(&self, share_id: &str, stderr: &str) {
+        let dir = self.fake_dir().join("fail");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(format!("item-list.{share_id}")), stderr).unwrap();
+    }
+
+    /// Choose the 1-based picker line fzf returns.
+    pub fn pick(&self, line: usize) {
+        fs::write(self.fake_dir().join("fzf-pick"), line.to_string()).unwrap();
+    }
+
+    pub fn cancel_picker(&self) {
+        fs::write(self.fake_dir().join("fzf-pick"), "cancel").unwrap();
+    }
+
+    pub fn remove_tool(&self, name: &str) {
+        fs::remove_file(self.bin_dir().join(name)).unwrap();
+    }
+
+    /// Run pq with `args` and return its output.
+    pub fn run(&self, args: &[&str]) -> Output {
+        self.write_scenario();
+        Command::new(env!("CARGO_BIN_EXE_pq"))
+            .args(args)
+            .env_clear()
+            .env("PATH", self.path_var())
+            .env("HOME", self.home_dir())
+            .env("XDG_CACHE_HOME", self.cache_dir())
+            .env("PQ_FAKE_DIR", self.fake_dir())
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::null())
+            .output()
+            .expect("run pq")
+    }
+
+    /// Every pass-cli invocation so far, as argument lists.
+    pub fn calls(&self) -> Vec<Vec<String>> {
+        let log = fs::read_to_string(self.fake_dir().join("calls")).unwrap_or_default();
+        log.lines()
+            .map(|line| {
+                line.split('\t')
+                    .filter(|arg| !arg.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The pass-cli calls whose first two arguments are `command` (e.g. "item list").
+    pub fn calls_to(&self, command: &str) -> Vec<Vec<String>> {
+        self.calls()
+            .into_iter()
+            .filter(|call| call.len() >= 2 && call[..2].join(" ") == command)
+            .collect()
+    }
+
+    pub fn clear_calls(&self) {
+        let _ = fs::remove_file(self.fake_dir().join("calls"));
+    }
+
+    /// Everything copied to the clipboard, in order, with the arguments of each copy.
+    pub fn copies(&self) -> Vec<(String, String)> {
+        let dir = self.fake_dir().join("clipboard");
+        (0..)
+            .map_while(|n| {
+                let text = fs::read_to_string(dir.join(format!("{n}.txt"))).ok()?;
+                let args = fs::read_to_string(dir.join(format!("{n}.args"))).unwrap_or_default();
+                Some((text, args))
+            })
+            .collect()
+    }
+
+    pub fn fzf_input(&self) -> Option<String> {
+        fs::read_to_string(self.fake_dir().join("fzf-input")).ok()
+    }
+
+    pub fn cache_file(&self) -> PathBuf {
+        self.cache_dir()
+            .join("pp-pass-cli")
+            .join("vault-cache.json")
+    }
+
+    fn write_scenario(&self) {
+        let fake = self.fake_dir();
+        for dir in ["items", "views", "fields"] {
+            fs::create_dir_all(fake.join(dir)).unwrap();
+        }
+
+        let vaults: Vec<Value> = self
+            .vaults
+            .iter()
+            .map(|(name, share_id)| {
+                json!({ "name": name, "vault_id": format!("vault-{share_id}"), "share_id": share_id })
+            })
+            .collect();
+        write_json(&fake.join("vaults.json"), &json!({ "vaults": vaults }));
+
+        for (_, share_id) in &self.vaults {
+            let in_vault: Vec<&Item> = self
+                .items
+                .iter()
+                .filter(|item| item.share_id == *share_id)
+                .collect();
+            let all: Vec<Value> = in_vault.iter().map(|item| summary(item)).collect();
+            let logins: Vec<Value> = in_vault
+                .iter()
+                .filter(|item| matches!(item.content, Content::Login(_)))
+                .map(|item| summary(item))
+                .collect();
+            write_json(
+                &fake.join("items").join(format!("{share_id}.json")),
+                &json!({ "items": all }),
+            );
+            write_json(
+                &fake.join("items").join(format!("{share_id}.login.json")),
+                &json!({ "items": logins }),
+            );
+        }
+
+        for item in &self.items {
+            write_json(
+                &fake.join("views").join(format!("{}.json", item.id)),
+                &view(item),
+            );
+            let fields = fake.join("fields").join(item.id);
+            fs::create_dir_all(&fields).unwrap();
+            if let Content::Login(login) = &item.content {
+                // pass-cli prints the value followed by a newline and omits empty fields.
+                for (name, value) in [
+                    ("username", login.username),
+                    ("email", login.email),
+                    ("password", login.password),
+                ] {
+                    if !value.is_empty() {
+                        fs::write(fields.join(name), format!("{value}\n")).unwrap();
+                    }
+                }
+            }
+        }
+    }
+
+    fn install(&self, name: &str, script: &str) {
+        let path = self.bin_dir().join(name);
+        fs::write(&path, script).expect("write fake tool");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    fn path_var(&self) -> String {
+        format!("{}:/usr/bin:/bin", self.bin_dir().display())
+    }
+
+    fn bin_dir(&self) -> PathBuf {
+        self.root.path().join("bin")
+    }
+
+    fn fake_dir(&self) -> PathBuf {
+        self.root.path().join("fake")
+    }
+
+    fn home_dir(&self) -> PathBuf {
+        self.root.path().join("home")
+    }
+
+    fn cache_dir(&self) -> PathBuf {
+        self.root.path().join("cache")
+    }
+}
+
+fn summary(item: &Item) -> Value {
+    let item_type = match item.content {
+        Content::Login(_) => "login",
+        Content::Note => "note",
+    };
+    json!({
+        "id": item.id,
+        "share_id": item.share_id,
+        "vault_id": format!("vault-{}", item.share_id),
+        "state": "Active",
+        "flags": [],
+        "create_time": "2026-01-01T00:00:00",
+        "modify_time": "2026-01-02T00:00:00",
+        "title": item.title,
+        "item_type": item_type,
+    })
+}
+
+fn view(item: &Item) -> Value {
+    let content = match &item.content {
+        Content::Login(login) => json!({ "Login": {
+            "email": login.email,
+            "username": login.username,
+            "password": login.password,
+            "urls": [],
+            "totp_uri": "",
+            "passkeys": [],
+            "autofill_urls": [],
+        }}),
+        Content::Note => json!({ "Note": null }),
+    };
+    json!({
+        "item": {
+            "id": item.id,
+            "share_id": item.share_id,
+            "vault_id": format!("vault-{}", item.share_id),
+            "content": {
+                "title": item.title,
+                "note": "",
+                "item_uuid": format!("uuid-{}", item.id),
+                "content": content,
+                "extra_fields": [],
+                "platform_specific": null,
+                "custom_icon": null,
+            },
+            "state": "Active",
+            "flags": [],
+            "create_time": "2026-01-01T00:00:00",
+            "modify_time": "2026-01-02T00:00:00",
+        },
+        "attachments": [],
+    })
+}
+
+fn write_json(path: &Path, value: &Value) {
+    fs::write(path, serde_json::to_string_pretty(value).unwrap()).unwrap();
+}
+
+pub fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+pub fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}

@@ -1,0 +1,87 @@
+#!/bin/sh
+# Fake pass-cli for pq's integration tests.
+#
+# Replays the scenario that tests/support/mod.rs writes into $PQ_FAKE_DIR,
+# using the JSON shapes of pass-cli 2.5.1, and appends every invocation to
+# $PQ_FAKE_DIR/calls (one call per line, arguments separated by tabs).
+set -u
+dir=${PQ_FAKE_DIR:?PQ_FAKE_DIR is not set}
+
+{
+    for arg in "$@"; do printf '%s\t' "$arg"; done
+    printf '\n'
+} >>"$dir/calls"
+
+command="${1:-}-${2:-}"
+
+# Injected failure: fail/<command> holds the stderr text, fail/<command>.code
+# the exit status (default 1). fail/item-list.<share-id> fails one vault.
+if [ -f "$dir/fail/$command" ]; then
+    cat "$dir/fail/$command" >&2
+    exit "$(cat "$dir/fail/$command.code" 2>/dev/null || echo 1)"
+fi
+
+unsupported() {
+    echo "fake pass-cli: unsupported invocation: $*" >&2
+    exit 2
+}
+
+case "$command" in
+vault-list)
+    cat "$dir/vaults.json"
+    ;;
+item-list)
+    shift 2
+    share="" filter=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        --share-id=*) share=${1#--share-id=} ;;
+        --filter-type) filter=$2; shift ;;
+        --output) shift ;;
+        *) unsupported "item list $*" ;;
+        esac
+        shift
+    done
+    [ -n "$share" ] || unsupported "item list without --share-id"
+    if [ -f "$dir/fail/item-list.$share" ]; then
+        cat "$dir/fail/item-list.$share" >&2
+        exit 1
+    fi
+    if [ -n "$filter" ]; then
+        cat "$dir/items/$share.$filter.json"
+    else
+        cat "$dir/items/$share.json"
+    fi
+    ;;
+item-view)
+    shift 2
+    item="" field="" output=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        --share-id=*) ;;
+        --item-id=*) item=${1#--item-id=} ;;
+        --field) field=$2; shift ;;
+        --output) output=$2; shift ;;
+        *) unsupported "item view $*" ;;
+        esac
+        shift
+    done
+    [ -n "$item" ] || unsupported "item view without --item-id"
+    if [ -n "$field" ]; then
+        # pass-cli omits empty fields and fails on a missing one.
+        if [ -f "$dir/fields/$item/$field" ]; then
+            cat "$dir/fields/$item/$field"
+        else
+            echo "Error: Field does not exist: $field" >&2
+            exit 1
+        fi
+    elif [ "$output" = json ]; then
+        cat "$dir/views/$item.json"
+    else
+        unsupported "item view without --field or --output json"
+    fi
+    ;;
+*)
+    unsupported "$@"
+    ;;
+esac
