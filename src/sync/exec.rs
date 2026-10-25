@@ -19,6 +19,7 @@ pub struct Command {
     args: Vec<String>,
     env: Vec<(String, SecretString)>,
     env_remove: Vec<String>,
+    env_remove_prefixes: Vec<String>,
     stdin: Option<SecretString>,
     timeout: Duration,
 }
@@ -38,6 +39,7 @@ impl Command {
             args: Vec::new(),
             env: Vec::new(),
             env_remove: Vec::new(),
+            env_remove_prefixes: Vec::new(),
             stdin: None,
             timeout,
         }
@@ -64,6 +66,18 @@ impl Command {
         self
     }
 
+    /// Leave out every inherited variable whose name starts with `prefix`
+    /// (one set with [`Command::env`] still goes in).
+    pub fn env_remove_prefix(mut self, prefix: &str) -> Self {
+        self.env_remove_prefixes.push(prefix.to_string());
+        self
+    }
+
+    #[cfg(test)]
+    pub fn removes_prefix(&self, prefix: &str) -> bool {
+        self.env_remove_prefixes.iter().any(|p| p == prefix)
+    }
+
     pub fn stdin(mut self, input: SecretString) -> Self {
         self.stdin = Some(input);
         self
@@ -86,6 +100,16 @@ impl Command {
             })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        for (key, _) in std::env::vars_os() {
+            let name = key.to_string_lossy();
+            if self
+                .env_remove_prefixes
+                .iter()
+                .any(|p| name.starts_with(p.as_str()))
+            {
+                command.env_remove(&key);
+            }
+        }
         for key in &self.env_remove {
             command.env_remove(key);
         }
@@ -219,6 +243,21 @@ mod tests {
             .run()
             .unwrap();
         assert_eq!(output.stdout.expose(), "unset");
+    }
+
+    #[test]
+    fn variables_by_prefix_are_not_inherited_but_set_ones_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = script(
+            &dir,
+            r#"printf '%s %s' "${HOME:-unset}" "${HOMELY:-unset}""#,
+        );
+        let output = Command::new(&tool, Duration::from_secs(5))
+            .env_remove_prefix("HOM")
+            .env("HOMELY", "mine")
+            .run()
+            .unwrap();
+        assert_eq!(output.stdout.expose(), "unset mine");
     }
 
     #[test]

@@ -44,8 +44,10 @@ impl Proton {
                 "PROTON_PASS_SESSION_DIR",
                 self.session_dir.display().to_string(),
             )
-            // Only `login` gets the token.
+            // Only `login` gets the token, and nothing of 1Password's
+            // (its service account token above all) reaches pass-cli.
             .env_remove("PROTON_PASS_PERSONAL_ACCESS_TOKEN")
+            .env_remove_prefix("OP_")
             // pass-cli reads the lowercase forms too; only ours apply.
             .env_remove("https_proxy")
             .env_remove("http_proxy")
@@ -302,6 +304,15 @@ mod tests {
 
     fn env_has(env: &str, line: &str) -> bool {
         env.lines().any(|l| l == line)
+    }
+
+    #[test]
+    fn pass_cli_gets_none_of_1password_s_settings() {
+        assert!(
+            proton(&FakeCli::new(), None)
+                .command()
+                .removes_prefix("OP_")
+        );
     }
 
     #[test]

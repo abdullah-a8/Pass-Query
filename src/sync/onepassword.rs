@@ -129,6 +129,10 @@ struct ItemJson {
     category: String,
     #[serde(default)]
     version: u64,
+    /// Absent or ACTIVE for a live item; ARCHIVED or DELETED when op was
+    /// told to include those (OP_INCLUDE_ARCHIVE, for one).
+    #[serde(default)]
+    state: Option<String>,
 }
 
 impl OnePassword {
@@ -141,7 +145,9 @@ impl OnePassword {
     }
 
     fn command(&self) -> Command {
+        // Nothing of Proton's (its access token above all) reaches op.
         let mut command = Command::new(&self.program, TIMEOUT)
+            .env_remove_prefix("PROTON_PASS_")
             .env_remove("OP_DEBUG")
             .env_remove("OP_FORMAT")
             .env_remove("OP_SERVICE_ACCOUNT_TOKEN");
@@ -202,7 +208,9 @@ impl OpApi for OnePassword {
         };
         Ok(items
             .into_iter()
-            .filter(|item| !item.id.is_empty())
+            .filter(|item| {
+                !item.id.is_empty() && item.state.as_deref().is_none_or(|s| s == "ACTIVE")
+            })
             .map(|item| OpSummary {
                 kind: op_json::kind_of_category(&item.category),
                 id: item.id,
@@ -365,6 +373,35 @@ mod tests {
         let fake = FakeCli::new();
         fake.respond("item-list", "");
         assert!(op(&fake, None).items("v1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn archived_and_deleted_items_are_not_listed_however_they_got_there() {
+        // OP_INCLUDE_ARCHIVE in the environment adds them, marked.
+        let fake = FakeCli::new();
+        fake.respond(
+            "item-list",
+            r#"[{"id":"op1","title":"Site","version":4,"category":"LOGIN"},
+                {"id":"op2","title":"Old","version":2,"category":"LOGIN","state":"ARCHIVED"},
+                {"id":"op3","title":"Gone","version":2,"category":"LOGIN","state":"DELETED"},
+                {"id":"op4","title":"Here","version":1,"category":"LOGIN","state":"ACTIVE"}]"#,
+        );
+        let ids: Vec<String> = op(&fake, None)
+            .items("v1")
+            .unwrap()
+            .into_iter()
+            .map(|item| item.id)
+            .collect();
+        assert_eq!(ids, ["op1", "op4"]);
+    }
+
+    #[test]
+    fn op_gets_none_of_proton_s_settings() {
+        assert!(
+            op(&FakeCli::new(), None)
+                .command()
+                .removes_prefix("PROTON_PASS_")
+        );
     }
 
     #[test]
