@@ -106,11 +106,14 @@ impl Command {
         // open by a leftover process cannot hold the run past its deadline.
         let writer = self.stdin.and_then(|input| {
             let mut stdin = child.stdin.take()?;
-            Some(std::thread::spawn(move || {
+            let (send, receive) = mpsc::channel();
+            std::thread::spawn(move || {
                 // A tool that exits without reading gives EPIPE; its exit
                 // status says more.
                 let _ = stdin.write_all(input.expose().as_bytes());
-            }))
+                let _ = send.send(());
+            });
+            Some(receive)
         });
         let stdout = read_in_background(child.stdout.take().context("stdout")?);
         let stderr = read_in_background(child.stderr.take().context("stderr")?);
@@ -127,12 +130,14 @@ impl Command {
             }
             std::thread::sleep(Duration::from_millis(10));
         };
-        if let Some(writer) = writer {
-            let _ = writer.join();
-        }
-        // Once the tool has exited, its output is waited for only until the
-        // deadline (and a second more for the readers to finish).
+        // Once the tool has exited, its input and output are waited for only
+        // until the deadline (and a second more for the threads to finish).
         let left = || deadline.saturating_duration_since(Instant::now()) + Duration::from_secs(1);
+        if let Some(writer) = writer {
+            writer
+                .recv_timeout(left())
+                .map_err(|_| anyhow::anyhow!("{name} left its input open"))?;
+        }
         let stdout = stdout
             .recv_timeout(left())
             .map_err(|_| anyhow::anyhow!("{name} left its output open"))??;
@@ -225,6 +230,21 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(6));
         let err = result.err().unwrap().to_string();
         assert!(err.contains("left its output open"), "{err}");
+    }
+
+    #[test]
+    fn a_leftover_process_holding_stdin_does_not_hold_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        // The tool exits at once, leaving a child that keeps stdin open
+        // without reading it, so a large input never finishes writing.
+        let tool = script(&dir, "sleep 8 <&0 >/dev/null 2>&1 &");
+        let started = Instant::now();
+        let result = Command::new(&tool, Duration::from_secs(2))
+            .stdin(SecretString::new("x".repeat(1 << 20)))
+            .run();
+        assert!(started.elapsed() < Duration::from_secs(6));
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("left its input open"), "{err}");
     }
 
     #[test]
