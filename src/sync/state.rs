@@ -39,6 +39,17 @@ pub struct State {
     /// Unix times of 1Password requests in the last day, for the budget.
     #[serde(default)]
     pub op_requests: Vec<u64>,
+    /// 1Password copies asked for but not yet seen made: a copy whose reply
+    /// was lost (a timeout, a crash) is paired by its reference alone.
+    #[serde(default)]
+    pub pending: Vec<PendingCopy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingCopy {
+    pub proton_share: String,
+    pub proton_item: String,
+    pub op_vault: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -79,9 +90,11 @@ pub struct ItemPair {
     /// CLI cannot show (a passkey) or keep (files).
     #[serde(default)]
     pub op_guarded: bool,
-    /// 1Password-only changes already reported, by field: the 1Password
-    /// value's hash. A change is reported once, and until it is applied in
-    /// Proton it stands for 1Password's value when the item is not read.
+    /// Fields where 1Password differs from the base, by field: the
+    /// 1Password value's hash ("" when absent), so it stands for
+    /// 1Password's value when the item is not read; a 1Password-only change
+    /// is reported once. `!field`: a Proton value held back from a guarded
+    /// item, reported once.
     #[serde(default)]
     pub reported: BTreeMap<String, FieldHash>,
     /// Fields 1Password stores differently from how Proton gave them (it
@@ -106,6 +119,7 @@ impl State {
             vaults: Vec::new(),
             items: Vec::new(),
             op_requests: Vec::new(),
+            pending: Vec::new(),
         }
     }
 

@@ -2,6 +2,7 @@
 
 #![cfg(test)]
 
+use super::api::OpApi;
 use super::engine::{Config, run};
 use super::memory::{MemoryOp, MemoryProton};
 use super::record::{FieldKind, Kind, Record};
@@ -46,6 +47,13 @@ impl World {
     }
 
     fn sync(&mut self) -> Report {
+        let (report, result) = self.try_sync();
+        result.unwrap();
+        report
+    }
+
+    /// A run that may fail, with what it did up to the failure.
+    fn try_sync(&mut self) -> (Report, anyhow::Result<()>) {
         let saves = &mut self.saves;
         let mut save = |_: &State| {
             *saves += 1;
@@ -60,7 +68,16 @@ impl World {
             NOW,
             &mut save,
         )
-        .unwrap()
+    }
+
+    fn op_item_of(&self, proton_item: &str) -> String {
+        self.state
+            .items
+            .iter()
+            .find(|p| p.proton_item == proton_item)
+            .unwrap()
+            .op_item
+            .clone()
     }
 
     fn op_ids(&self) -> Vec<String> {
@@ -470,4 +487,174 @@ fn a_vault_without_a_1password_counterpart_is_reported() {
     w.sync();
     assert!(w.op.vaults.iter().any(|v| v.name == "Proton · Work"));
     assert_eq!(w.state.vaults.len(), 2);
+}
+
+#[test]
+fn a_1password_move_is_found_with_a_change_already_reported() {
+    let mut w = World::new();
+    w.proton.vault("ps2", "Work");
+    w.op.vault("ov2", "Proton · Work");
+    let id = w.proton.add("ps1", login("Site", "alice", "pw1"));
+    w.sync();
+    let op_id = w.op_item_of(&id);
+    w.op.edit_by_owner("ov1", &op_id, |r| {
+        r.set("password", "pw2", FieldKind::Concealed)
+    });
+    w.sync();
+    w.proton
+        .edit("ps1", &id, |r| r.set("username", "alice2", FieldKind::Text));
+    w.op.move_item(&op_id, "ov1", "ov2").unwrap();
+    let report = w.sync();
+    assert!(
+        has(&report, |e| matches!(e, Event::Moved { .. })),
+        "{report}"
+    );
+    assert!(w.proton.active_in("ps1").is_empty());
+    let moved = w.proton.active_in("ps2");
+    assert_eq!(moved.len(), 1, "moved, not copied and trashed");
+    assert_eq!(moved[0].1.record.value("username"), "alice2");
+}
+
+#[test]
+fn an_unread_1password_item_holds_back_deletions_it_could_explain() {
+    let mut w = World::new();
+    w.proton.vault("ps2", "Work");
+    w.op.vault("ov2", "Proton · Work");
+    let id = w.proton.add("ps1", login("Site", "alice", "pw1"));
+    w.sync();
+    let op_id = w.op_item_of(&id);
+    w.op.move_item(&op_id, "ov1", "ov2").unwrap();
+    // The vault list and both item lists, then a rate limit: the moved
+    // item cannot be read.
+    w.op.rate_limit_at = Some(w.op.requests() + 3);
+    let report = w.sync();
+    assert!(
+        !has(&report, |e| matches!(e, Event::TrashedInProton { .. })),
+        "{report}"
+    );
+    assert_eq!(w.proton.active_in("ps1").len(), 1);
+
+    w.op.rate_limit_at = None;
+    let report = w.sync();
+    assert!(
+        has(&report, |e| matches!(e, Event::Moved { .. })),
+        "{report}"
+    );
+    assert_eq!(w.proton.active_in("ps2").len(), 1);
+}
+
+#[test]
+fn a_run_that_fails_still_returns_what_it_reported() {
+    let mut w = World::new();
+    let a = w.proton.add("ps1", login("A", "a", "1"));
+    let b = w.proton.add("ps1", login("B", "b", "2"));
+    w.sync();
+    for id in [&a, &b] {
+        let op_id = w.op_item_of(id);
+        w.op.edit_by_owner("ov1", &op_id, |r| {
+            r.set("password", "changed", FieldKind::Concealed)
+        });
+    }
+    // Both listings and the first read, then the token is refused.
+    w.op.signed_out_at = Some(w.op.requests() + 3);
+    let (report, result) = w.try_sync();
+    assert!(result.is_err());
+    assert!(
+        has(&report, |e| matches!(e, Event::OpOnlyChange { .. })),
+        "{report}"
+    );
+}
+
+#[test]
+fn a_copy_whose_reply_was_lost_is_paired_though_1password_changed_it() {
+    let mut w = World::new();
+    w.op.lowercase_urls = true;
+    w.op.lose_create_reply = true;
+    w.proton.add("ps1", login("Site", "alice", "pw1"));
+    w.sync();
+    assert_eq!(w.state.items.len(), 0);
+
+    w.op.lose_create_reply = false;
+    let report = w.sync();
+    assert!(
+        has(&report, |e| matches!(e, Event::Paired { .. })),
+        "{report}"
+    );
+    assert_eq!(w.op_ids().len(), 1);
+    assert_eq!(w.proton.active_in("ps1").len(), 1);
+    assert!(w.state.pending.is_empty());
+    let report = w.sync();
+    assert!(report.events.is_empty(), "{report}");
+}
+
+#[test]
+fn deletions_done_before_a_failure_are_saved() {
+    let mut w = World::new();
+    let a = w.proton.add("ps1", login("A", "a", "1"));
+    let b = w.proton.add("ps1", login("B", "b", "2"));
+    w.sync();
+    w.proton.trash_item("ps1", &a);
+    w.proton.trash_item("ps1", &b);
+    // Both listings and the first archive, then the token is refused.
+    w.op.signed_out_at = Some(w.op.requests() + 4);
+    let (_, result) = w.try_sync();
+    assert!(result.is_err());
+    assert_eq!(w.op.archived.len(), 1);
+    assert_eq!(w.state.items.len(), 1);
+}
+
+#[test]
+fn a_blocked_conflict_settles_once_proton_takes_1passwords_value() {
+    let mut w = World::new();
+    let op_id = w.op.add_native("ov1", &login("Site", "alice", "pw1"));
+    w.sync();
+    let id = w.state.items[0].proton_item.clone();
+    w.proton.edit("ps1", &id, |r| {
+        r.set("password", "from-proton", FieldKind::Concealed)
+    });
+    w.op.edit_by_owner("ov1", &op_id, |r| {
+        r.set("password", "from-1password", FieldKind::Concealed)
+    });
+    let report = w.sync();
+    assert!(
+        has(&report, |e| matches!(e, Event::Blocked { .. })),
+        "{report}"
+    );
+
+    w.proton.edit("ps1", &id, |r| {
+        r.set("password", "from-1password", FieldKind::Concealed)
+    });
+    let report = w.sync();
+    assert!(report.events.is_empty(), "{report}");
+    assert!(w.state.items[0].reported.is_empty());
+    let report = w.sync();
+    assert!(report.events.is_empty(), "{report}");
+}
+
+#[test]
+fn a_used_up_daily_budget_stops_the_listings_too() {
+    let mut w = World::new();
+    w.proton.add("ps1", login("Site", "alice", "pw1"));
+    w.sync();
+    w.config.op_requests_per_day = w.state.op_requests_today(NOW);
+    let requests = w.op.requests();
+    let report = w.sync();
+    assert!(
+        has(&report, |e| matches!(e, Event::OpStopped(_))),
+        "{report}"
+    );
+    assert_eq!(w.op.requests(), requests);
+}
+
+#[test]
+fn each_run_counts_only_its_own_requests() {
+    let mut w = World::new();
+    w.proton.add("ps1", login("Site", "alice", "pw1"));
+    w.sync();
+    let (made, counted) = (w.op.requests(), w.state.op_requests_today(NOW));
+    w.sync();
+    assert_eq!(
+        w.state.op_requests_today(NOW) - counted,
+        w.op.requests() - made
+    );
 }

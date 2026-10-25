@@ -20,9 +20,9 @@ use super::merge::{self, MergeInput};
 use super::onepassword::OpProblem;
 use super::op_json::{self, OpItem, RawItem};
 use super::proton_json::{self, ProtonItem};
-use super::record::FieldHash;
+use super::record::{FieldHash, Record};
 use super::report::{Event, Report};
-use super::state::{Equivalent, ItemPair, Origin, State, VaultPair};
+use super::state::{Equivalent, ItemPair, Origin, PendingCopy, State, VaultPair};
 use crate::pass_cli::SessionProblem;
 
 #[derive(Debug, Clone)]
@@ -71,7 +71,8 @@ pub fn proton_ref(share: &str, item: &str) -> String {
 }
 
 /// Run one sync. `save` persists the state; it is called after every
-/// change to it (never in a dry run).
+/// change to it (never in a dry run). The report comes back even when the
+/// run fails: what it holds is already marked reported in the state.
 pub fn run(
     proton: &mut dyn ProtonApi,
     op: &mut dyn OpApi,
@@ -80,7 +81,10 @@ pub fn run(
     config: &Config,
     now: u64,
     save: &mut dyn FnMut(&State) -> Result<()>,
-) -> Result<Report> {
+) -> (Report, Result<()>) {
+    // The adapter may have made requests before this run; those are not
+    // this run's to record.
+    let recorded_requests = op.requests();
     let mut engine = Engine {
         proton,
         op,
@@ -95,13 +99,14 @@ pub fn run(
         },
         op_writes: 0,
         op_stopped: false,
-        recorded_requests: 0,
+        recorded_requests,
+        proton_unread: false,
+        op_unread: false,
     };
     let result = engine.sync();
     // Whatever happened, count the requests made.
-    engine.persist()?;
-    result?;
-    Ok(engine.report)
+    let saved = engine.persist();
+    (engine.report, result.and(saved))
 }
 
 /// A vault pair being synced, with both listings.
@@ -135,6 +140,11 @@ struct Engine<'a> {
     op_stopped: bool,
     /// Of `op.requests()`, how many are already in the state.
     recorded_requests: usize,
+    /// Some Proton item, or a whole vault, could not be read this run: a
+    /// pair gone from Proton may have moved to it, so is not deleted.
+    proton_unread: bool,
+    /// The same for 1Password.
+    op_unread: bool,
 }
 
 /// 1Password's hashes in Proton's form, where the pair knows 1Password
@@ -218,6 +228,7 @@ impl Engine<'_> {
             &proton_items,
             &op_items,
         )?;
+        self.forget_settled_copies(&runs);
         self.copy_to_op(&runs, &unpaired_proton, &proton_items)?;
         self.copy_to_proton(&runs, &unpaired_op, &op_items)?;
         self.update_pairs(&mut runs, &standings, &moved)?;
@@ -310,6 +321,9 @@ impl Engine<'_> {
                     && !self.config.exclude_vaults.contains(&vault.name)
             })
             .collect();
+        if !self.op_allows(op_requests::VAULT_LIST, false) {
+            return Ok(Vec::new());
+        }
         let op_vaults = match self.op.vaults() {
             Ok(vaults) => vaults,
             Err(e) => {
@@ -344,13 +358,19 @@ impl Engine<'_> {
             let proton_items = match self.proton.items(&proton_vault.id) {
                 Ok(items) => items,
                 Err(e) => {
+                    self.proton_unread = true;
                     self.proton_failed(e, &proton_vault.name)?;
                     continue;
                 }
             };
+            if !self.op_allows(op_requests::ITEM_LIST, false) {
+                self.op_unread = true;
+                continue;
+            }
             let op_items = match self.op.items(&op_vault.id) {
                 Ok(items) => items,
                 Err(e) => {
+                    self.op_unread = true;
                     self.op_failed(e, &op_vault.name)?;
                     continue;
                 }
@@ -500,7 +520,10 @@ impl Engine<'_> {
                     read.insert((*index, id.clone()), item);
                 }
                 Ok(_) => {}
-                Err(e) => self.proton_failed(e, &run.proton_items[id].title)?,
+                Err(e) => {
+                    self.proton_unread = true;
+                    self.proton_failed(e, &run.proton_items[id].title)?;
+                }
             }
         }
         Ok(read)
@@ -514,6 +537,7 @@ impl Engine<'_> {
         let mut read = BTreeMap::new();
         for (index, id) in items {
             if !self.op_allows(op_requests::ITEM_GET, false) {
+                self.op_unread = true;
                 break;
             }
             let run = &runs[*index];
@@ -522,7 +546,10 @@ impl Engine<'_> {
                     read.insert((*index, id.clone()), item);
                 }
                 Ok(None) => {}
-                Err(e) => self.op_failed(e, &run.op_items[id].title)?,
+                Err(e) => {
+                    self.op_unread = true;
+                    self.op_failed(e, &run.op_items[id].title)?;
+                }
             }
         }
         Ok(read)
@@ -620,6 +647,9 @@ impl Engine<'_> {
                 }
                 // Gone from its 1Password vault: moved there by the owner?
                 Some(Standing::GoneFromOp) => {
+                    // With the 1Password changes already reported: the item
+                    // as 1Password last had it.
+                    let expected = Self::op_side_of(&pair);
                     let found = unpaired_op.iter().position(|(run, id)| {
                         runs[*run].op.id != pair.op_vault
                             && op_items.get(&(*run, id.clone())).is_some_and(|item| {
@@ -627,7 +657,7 @@ impl Engine<'_> {
                                     && translate(
                                         item.record.field_hashes(self.key),
                                         &pair.equivalents,
-                                    ) == pair.base
+                                    ) == expected
                             })
                     });
                     let Some(position) = found else { continue };
@@ -707,9 +737,22 @@ impl Engine<'_> {
                             .all(|(name, hash)| op_hashes.get(name) == Some(hash))
                 })
             };
-            // The reference is item content anyone with access to the item
-            // could set: it only picks among items whose content matches.
-            let by_ref = by_ref.filter(|&position| content_matches(&unpaired_proton[position].1));
+            // A copy pq-sync asked for and never saw made: its reference
+            // is enough, as 1Password may have changed what it was given.
+            let asked_for = |id: &String| {
+                self.state.pending.contains(&PendingCopy {
+                    proton_share: share.clone(),
+                    proton_item: id.clone(),
+                    op_vault: runs[run].op.id.clone(),
+                })
+            };
+            // Otherwise the reference is item content anyone with access to
+            // the item could set: it only picks among items whose content
+            // matches.
+            let by_ref = by_ref.filter(|&position| {
+                let id = &unpaired_proton[position].1;
+                asked_for(id) || content_matches(id)
+            });
             let by_content = || {
                 unpaired_proton.iter().position(|(r, id)| {
                     *r == run
@@ -727,6 +770,7 @@ impl Engine<'_> {
                 index += 1;
                 continue;
             };
+            let ours_lost = by_ref == Some(position) && asked_for(&unpaired_proton[position].1);
             let (_, proton_id) = unpaired_proton.remove(position);
             unpaired_op.remove(index);
             let title = runs[run].op_items[&op_id].title.clone();
@@ -734,6 +778,15 @@ impl Engine<'_> {
                 title: title.clone(),
             });
             if self.config.dry_run {
+                continue;
+            }
+            if ours_lost && let Some(proton) = proton_items.get(&(run, proton_id.clone())) {
+                let pair = self.copied_pair(&runs[run], &proton_id, &proton.record, op_item);
+                self.state
+                    .pending
+                    .retain(|p| !(p.proton_share == *share && p.proton_item == proton_id));
+                self.state.items.push(pair);
+                self.persist()?;
                 continue;
             }
             let proton_hashes = proton_items
@@ -801,35 +854,30 @@ impl Engine<'_> {
                 });
                 continue;
             }
+            let intent = PendingCopy {
+                proton_share: target.proton.id.clone(),
+                proton_item: id.clone(),
+                op_vault: target.op.id.clone(),
+            };
+            let asked_before = self.state.pending.contains(&intent);
+            // The copy asked for last time may be among the items not read.
+            if asked_before && self.op_unread {
+                continue;
+            }
             if !self.op_allows(op_requests::ITEM_CREATE, true) {
                 break;
+            }
+            if !asked_before {
+                self.state.pending.push(intent.clone());
+                self.persist()?;
             }
             let json = op_json::create_json(&item.record, &proton_ref(&target.proton.id, id));
             match self.op.create(&target.op.id, &json) {
                 Ok(created) => {
                     self.op_writes += 1;
-                    let proton_hashes = item.record.field_hashes(self.key);
-                    let op_hashes = created.record.field_hashes(self.key);
-                    let mut equivalents = BTreeMap::new();
-                    let all: BTreeSet<&String> =
-                        proton_hashes.keys().chain(op_hashes.keys()).collect();
-                    note_equivalents(&mut equivalents, all, &proton_hashes, &op_hashes);
-                    let op_id = created.raw.0["id"].as_str().unwrap_or_default().to_string();
-                    self.state.items.push(ItemPair {
-                        kind: item.record.kind,
-                        origin: Origin::Proton,
-                        proton_share: target.proton.id.clone(),
-                        proton_item: id.clone(),
-                        op_vault: target.op.id.clone(),
-                        op_item: op_id,
-                        proton_modified: target.proton_items[id].modified.clone(),
-                        op_version: version_of(&created.raw),
-                        base: proton_hashes,
-                        proton_missing: BTreeSet::new(),
-                        op_guarded: created.has_files,
-                        reported: BTreeMap::new(),
-                        equivalents,
-                    });
+                    let pair = self.copied_pair(target, id, &item.record, &created);
+                    self.state.pending.retain(|p| *p != intent);
+                    self.state.items.push(pair);
                     self.report.push(Event::CreatedInOp {
                         vault: target.op.name.clone(),
                         title,
@@ -840,6 +888,54 @@ impl Engine<'_> {
             }
         }
         Ok(())
+    }
+
+    /// The pair for a Proton item and the 1Password copy pq-sync made of
+    /// it, noting what 1Password stores differently from what it was given.
+    fn copied_pair(
+        &self,
+        run: &VaultRun,
+        proton_id: &str,
+        proton: &Record,
+        created: &OpItem,
+    ) -> ItemPair {
+        let proton_hashes = proton.field_hashes(self.key);
+        let op_hashes = created.record.field_hashes(self.key);
+        let mut equivalents = BTreeMap::new();
+        let all: BTreeSet<&String> = proton_hashes.keys().chain(op_hashes.keys()).collect();
+        note_equivalents(&mut equivalents, all, &proton_hashes, &op_hashes);
+        ItemPair {
+            kind: proton.kind,
+            origin: Origin::Proton,
+            proton_share: run.proton.id.clone(),
+            proton_item: proton_id.to_string(),
+            op_vault: run.op.id.clone(),
+            op_item: created.raw.0["id"].as_str().unwrap_or_default().to_string(),
+            proton_modified: run.proton_items[proton_id].modified.clone(),
+            op_version: version_of(&created.raw),
+            base: proton_hashes,
+            proton_missing: BTreeSet::new(),
+            op_guarded: created.has_files || created.ambiguous,
+            reported: BTreeMap::new(),
+            equivalents,
+        }
+    }
+
+    /// Forget the copies asked for whose Proton item is paired or gone.
+    fn forget_settled_copies(&mut self, runs: &[VaultRun]) {
+        let State { items, pending, .. } = &mut *self.state;
+        pending.retain(|p| {
+            let Some(run) = runs
+                .iter()
+                .find(|run| run.proton.id == p.proton_share && run.op.id == p.op_vault)
+            else {
+                return true;
+            };
+            run.proton_items.contains_key(&p.proton_item)
+                && !items
+                    .iter()
+                    .any(|i| i.proton_share == p.proton_share && i.proton_item == p.proton_item)
+        });
     }
 
     fn copy_to_proton(
@@ -1058,15 +1154,23 @@ impl Engine<'_> {
                     fields: names(&plan.conflicts),
                 });
             }
+            // Every field where 1Password is left differing from the base
+            // (its own change, or one that lost a conflict it could not be
+            // told of), so `op_side_of` stands for it when it is not read.
             let mut reported = BTreeMap::new();
-            let mut new_op_changes = Vec::new();
-            for name in &plan.op_only_changes {
-                let hash = op_hashes.get(name).cloned().unwrap_or_default();
-                if pair.reported.get(name) != Some(&hash) {
-                    new_op_changes.push(name.clone());
+            let fields: BTreeSet<&String> = op_hashes.keys().chain(plan.new_base.keys()).collect();
+            for name in fields {
+                let in_op = op_hashes.get(name);
+                if !plan.write_to_op.contains(name) && in_op != plan.new_base.get(name) {
+                    reported.insert(name.clone(), in_op.cloned().unwrap_or_default());
                 }
-                reported.insert(name.clone(), hash);
             }
+            let new_op_changes: Vec<String> = plan
+                .op_only_changes
+                .iter()
+                .filter(|name| pair.reported.get(*name) != reported.get(*name))
+                .cloned()
+                .collect();
             let mut new_blocked = Vec::new();
             for name in &plan.blocked {
                 let marker = format!("!{name}");
@@ -1144,6 +1248,25 @@ impl Engine<'_> {
         moved: &BTreeSet<usize>,
     ) -> Result<()> {
         let mut remove = BTreeSet::new();
+        let result = self.delete_from_runs(runs, standings, moved, &mut remove);
+        // A deletion done stays done, even when a later one ends the run.
+        if !self.config.dry_run && !remove.is_empty() {
+            for i in remove.into_iter().rev() {
+                self.state.items.remove(i);
+            }
+            self.persist()?;
+        }
+        result
+    }
+
+    /// Delete what vanished, noting in `remove` the pairs that are done.
+    fn delete_from_runs(
+        &mut self,
+        runs: &[VaultRun],
+        standings: &[Option<Standing>],
+        moved: &BTreeSet<usize>,
+        remove: &mut BTreeSet<usize>,
+    ) -> Result<()> {
         for (run_index, run) in runs.iter().enumerate() {
             let in_run: Vec<usize> = (0..standings.len())
                 .filter(|&i| {
@@ -1185,6 +1308,10 @@ impl Engine<'_> {
             for i in vanished {
                 let pair = self.state.items[i].clone();
                 match standings[i] {
+                    // It may have moved to an item that could not be read:
+                    // a later run tells.
+                    Some(Standing::GoneFromProton) if self.proton_unread => {}
+                    Some(Standing::GoneFromOp) if self.op_unread => {}
                     Some(Standing::GoneFromProton) => {
                         let title = run.op_items[&pair.op_item].title.clone();
                         if self.config.dry_run {
@@ -1220,12 +1347,6 @@ impl Engine<'_> {
                     _ => {}
                 }
             }
-        }
-        if !self.config.dry_run && !remove.is_empty() {
-            for i in remove.into_iter().rev() {
-                self.state.items.remove(i);
-            }
-            self.persist()?;
         }
         Ok(())
     }

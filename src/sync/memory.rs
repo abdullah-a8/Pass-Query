@@ -212,6 +212,10 @@ pub struct MemoryOp {
     pub lowercase_urls: bool,
     /// Answer with a rate limit once this many requests were made.
     pub rate_limit_at: Option<usize>,
+    /// Refuse the token once this many requests were made.
+    pub signed_out_at: Option<usize>,
+    /// Make each create, but answer as if it timed out.
+    pub lose_create_reply: bool,
 }
 
 impl MemoryOp {
@@ -228,6 +232,11 @@ impl MemoryOp {
             && self.requests >= limit
         {
             return Err(anyhow::Error::new(OpProblem::RateLimited));
+        }
+        if let Some(limit) = self.signed_out_at
+            && self.requests >= limit
+        {
+            return Err(anyhow::Error::new(OpProblem::NotSignedIn));
         }
         self.requests += weight;
         Ok(())
@@ -348,7 +357,11 @@ impl OpApi for MemoryOp {
         self.next_id += 1;
         let id = format!("o{}", self.next_id);
         let raw: Value = serde_json::from_str(json.expose()).unwrap();
-        Ok(self.store(vault, &id, raw, 1))
+        let created = self.store(vault, &id, raw, 1);
+        if self.lose_create_reply {
+            bail!("op did not finish within 60s");
+        }
+        Ok(created)
     }
 
     fn edit(&mut self, vault: &str, item: &str, raw: &RawItem) -> Result<OpItem> {
