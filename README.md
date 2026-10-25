@@ -22,7 +22,7 @@
 
 ### Prebuilt binary
 
-Download the archive for your platform from the [latest release](https://github.com/abdullah-a8/Pass-Query/releases/latest):
+Download the archive for your platform from the [latest release](https://github.com/abdullah-a8/Pass-Query/releases/latest). Each holds `pq` and `pq-sync`:
 
 | Platform | Archive |
 |---|---|
@@ -34,17 +34,17 @@ Download the archive for your platform from the [latest release](https://github.
 The Linux binaries are static and run on any distribution. Verify the download, then install it:
 
 ```
-shasum -a 256 -c pq-v0.5.0-x86_64-unknown-linux-musl.tar.gz.sha256 &&
-gh attestation verify pq-v0.5.0-x86_64-unknown-linux-musl.tar.gz \
+shasum -a 256 -c pq-v0.5.1-x86_64-unknown-linux-musl.tar.gz.sha256 &&
+gh attestation verify pq-v0.5.1-x86_64-unknown-linux-musl.tar.gz \
     --repo abdullah-a8/Pass-Query \
     --signer-workflow abdullah-a8/Pass-Query/.github/workflows/release.yml \
-    --source-ref refs/tags/v0.5.0 &&
-tar -xzf pq-v0.5.0-x86_64-unknown-linux-musl.tar.gz &&
+    --source-ref refs/tags/v0.5.1 &&
+tar -xzf pq-v0.5.1-x86_64-unknown-linux-musl.tar.gz &&
 mkdir -p ~/.local/bin &&
-install pq-v0.5.0-x86_64-unknown-linux-musl/pq ~/.local/bin/
+install pq-v0.5.1-x86_64-unknown-linux-musl/pq pq-v0.5.1-x86_64-unknown-linux-musl/pq-sync ~/.local/bin/
 ```
 
-`gh attestation verify` checks that the archive was built by this repository's release workflow from the `v0.5.0` tag. Each step runs only if the one before it succeeded.
+`gh attestation verify` checks that the archive was built by this repository's release workflow from the `v0.5.1` tag. Each step runs only if the one before it succeeded.
 
 ### From source
 

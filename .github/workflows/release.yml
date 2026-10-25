@@ -78,7 +78,9 @@ jobs:
 
       - name: Smoke test
         if: matrix.native
-        run: '"target/$TARGET/release/pq" --version'
+        run: |
+          "target/$TARGET/release/pq" --version
+          "target/$TARGET/release/pq-sync" --version
         env:
           TARGET: ${{ matrix.target }}
 
@@ -91,7 +93,8 @@ jobs:
           fi
           name="pq-$version-$TARGET"
           mkdir -p "dist/$name"
-          cp "target/$TARGET/release/pq" README.md LICENSE "dist/$name/"
+          cp "target/$TARGET/release/pq" "target/$TARGET/release/pq-sync" \
+            README.md LICENSE "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
           rm -r "dist/$name"
