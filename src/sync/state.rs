@@ -82,10 +82,23 @@ pub struct ItemPair {
     /// CLI cannot show (a passkey) or keep (files).
     #[serde(default)]
     pub op_guarded: bool,
-    /// The hash of each 1Password-only change already reported, so a run
-    /// reports a change once, not every time.
+    /// 1Password-only changes already reported, by field: the 1Password
+    /// value's hash. A change is reported once, and until it is applied in
+    /// Proton it stands for 1Password's value when the item is not read.
     #[serde(default)]
     pub reported: BTreeMap<String, FieldHash>,
+    /// Fields 1Password stores differently from how Proton gave them (it
+    /// normalised a URL, say): 1Password's hash stands for Proton's, so the
+    /// difference is not read as a change and written again every run.
+    #[serde(default)]
+    pub equivalents: BTreeMap<String, Equivalent>,
+}
+
+/// One field's value as each side stores it, by hash ("" when absent).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Equivalent {
+    pub proton: FieldHash,
+    pub op: FieldHash,
 }
 
 impl State {
@@ -202,6 +215,7 @@ mod tests {
             proton_missing: BTreeSet::from(["note".to_string()]),
             op_guarded: false,
             reported: BTreeMap::new(),
+            equivalents: BTreeMap::new(),
         }
     }
 
