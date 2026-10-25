@@ -12,6 +12,8 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use super::record::{FieldHash, Kind, keyed_hash};
@@ -101,14 +103,17 @@ impl State {
     /// it is unreadable, from another format, or made under another key.
     pub fn load(path: &Path, key: &[u8]) -> Result<Self> {
         let Some(data) = read_private(path) else {
-            if path.exists() {
-                bail!(
-                    "{} is not private to you (a link, someone else's, or writable by others); \
-                     pq-sync will not trust it. Inspect it, then move it away to start over.",
-                    path.display()
-                );
+            // Fresh only when there certainly is none: a state that could
+            // not be reached would otherwise be replaced by the next save.
+            if fs::symlink_metadata(path).is_err_and(|e| e.kind() == ErrorKind::NotFound) {
+                return Ok(State::new(key));
             }
-            return Ok(State::new(key));
+            bail!(
+                "{} cannot be read or is not private to you (a link, someone else's, writable \
+                 by others, or in a directory that is); pq-sync will not trust it. Inspect it, \
+                 then move it away to start over.",
+                path.display()
+            );
         };
         let state: State = parse_json(&data, &format!("{}", path.display()))?;
         if state.version != STATE_FORMAT_VERSION {
@@ -269,6 +274,19 @@ mod tests {
         std::fs::set_permissions(path(&dir), std::fs::Permissions::from_mode(0o666)).unwrap();
         let err = State::load(&path(&dir), KEY).unwrap_err();
         assert!(err.to_string().contains("not private"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_state_that_cannot_be_reached_is_refused_not_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        State::new(KEY).save(&path(&dir)).unwrap();
+        let state_dir = path(&dir).parent().unwrap().to_path_buf();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let loaded = State::load(&path(&dir), KEY);
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(loaded.is_err(), "an existing state was taken for none");
     }
 
     #[test]
