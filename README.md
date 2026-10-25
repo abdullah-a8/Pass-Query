@@ -98,6 +98,42 @@ Cache is stored at `~/.cache/pp-pass-cli/vault-cache.json` (or `$XDG_CACHE_HOME/
 
 **Security Note:** The cache only contains vault names, item titles, item types and item/share IDs. Passwords and usernames are never cached and are always fetched fresh from pass-cli when needed.
 
+## pq-sync: Proton Pass to 1Password
+
+`pq-sync`, installed alongside `pq`, keeps 1Password in step with Proton Pass, so you can keep Proton as the place your passwords and aliases live and use 1Password's apps and autofill every day. It syncs logins, secure notes, credit cards and identities through the two official CLIs, `pass-cli` and `op`.
+
+What it does on each run:
+
+- **New items** are copied both ways. A copy into Proton carries what `pass-cli item create` accepts; anything it cannot carry (custom fields, a login's note) is listed for you to copy by hand.
+- **Edits made in Proton** are written to 1Password, field by field. Fields you added in 1Password are kept.
+- **Edits made in 1Password** are reported, not written: `pass-cli` can update an item only with the new values on its command line, where other programs can read them. Make the edit in Proton and both sides agree.
+- **The same field edited differently on both sides** keeps Proton's value, and the conflict is reported.
+- **Items gone from one side** are archived in 1Password or moved to the Proton trash, never deleted for good. If more than 10% of a vault's items vanish in one run, nothing is deleted in that vault until you run `pq-sync run --allow-mass-delete`.
+- **Moves** between vaults on either side are followed.
+- **Passkeys and attachments are never synced.** `op item get` does not show passkeys, and editing an item from its JSON would drop them. So pq-sync stops writing to a 1Password item once it may hold one: when it was created in 1Password, has files attached, or was changed in 1Password since pq-sync last wrote it. Its Proton changes are then reported for you to make in 1Password. Items you leave to Proton keep syncing on their own.
+- **Aliases stay in Proton.** 1Password cannot create Proton or SimpleLogin aliases. A login that uses an alias carries the address like any other.
+
+Each Proton vault `X` pairs with a 1Password vault named `Proton · X`, which you create. pq-sync uses a 1Password service account, and service accounts cannot reach your built-in Personal or Private vault. Save new logins into a `Proton · …` vault so they reach Proton.
+
+### Setting it up
+
+1. In 1Password, create a vault `Proton · <name>` for each Proton vault you want synced, then a [service account](https://developer.1password.com/docs/service-accounts/get-started/) with read and write access to those vaults.
+2. Create a Proton personal access token for pq-sync and give it the editor role on the vaults to sync:
+   ```
+   pass-cli personal-access-token create --name pq-sync --expiration 1y
+   pass-cli personal-access-token access grant --help
+   ```
+3. Run `pq-sync setup`. It asks for both tokens (input hidden) and stores them in the macOS Keychain with a key for the state file. It also records where `pass-cli` and `op` are, and checks both sides. If Proton is blocked where you are, add `--proton-proxy http://host:port`; only pass-cli's traffic goes through it.
+4. Run `pq-sync run --dry-run` to see what would change, then `pq-sync run`. For a first large copy, `pq-sync run --as-me` uses your own 1Password sign-in instead of the service account, which on individual plans allows 100 writes an hour and 1,000 requests a day.
+5. Run `pq-sync install-agent` to sync every 30 minutes in the background. `pq-sync status` shows the last run's report. You get a notification when something needs you.
+
+### What pq-sync keeps
+
+- **Tokens and the state key:** in the login Keychain. Only the `pq-sync` binary that stored them can read them without asking; after an upgrade, run `pq-sync run` once in a terminal so macOS can ask.
+- **State:** `~/.local/state/pq-sync/state.json` (or `$XDG_STATE_HOME/pq-sync/`), private like pq's cache. It holds which item mirrors which, by ID, and a keyed hash of each field, never a value. The last report, with item titles, sits beside it.
+- **Proton session:** pq-sync keeps its own pass-cli session in that directory, apart from yours.
+- **Secrets in transit:** item contents reach the CLIs only through their standard input, and tokens only through the environment, never as command-line arguments.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
