@@ -358,7 +358,7 @@ fn bind(raw: &Value, kind: Kind, slots: &[Slot]) -> Result<(Record, Binding, Opt
     let mut custom_names: BTreeSet<String> = BTreeSet::new();
     for (index, field) in fields.iter().enumerate() {
         // An edit replaces a field's value and type, and removing a field
-        // takes its label and section along: all must be what the read
+        // takes its ID, label and section along: all must be what the read
         // takes them for.
         let text_or_absent =
             |value: Option<&Value>| value.is_none_or(|v| v.is_null() || v.is_string());
@@ -370,6 +370,7 @@ fn bind(raw: &Value, kind: Kind, slots: &[Slot]) -> Result<(Record, Binding, Opt
             Some(_) => false,
         };
         if !field.is_object()
+            || !text_or_absent(field.get("id"))
             || !text_or_absent(field.get("type"))
             || !text_or_absent(field.get("label"))
             || !section_ok
@@ -1666,6 +1667,19 @@ mod tests {
         }
         let url = json!([{ "href": "https://old.test", "primary": true, "label": { "secret": "RAW-ONLY" } }]);
         assert!(login(json!([]), url).ambiguous);
+
+        // A field ID that isn't text goes with the field when it is removed.
+        let note = json!({ "id": "n", "title": "N", "category": "SECURE_NOTE", "version": 1,
+            "fields": [{ "id": { "secret": "RAW-ONLY" }, "type": "CONCEALED",
+                         "label": "Token", "value": "known" }] });
+        let item = parse_item(&note.to_string()).unwrap().unwrap();
+        assert!(item.ambiguous);
+        let mut record = item.record.clone();
+        record.set("x:Token", "", FieldKind::Concealed);
+        let mut raw = item.raw;
+        let keys: BTreeSet<String> = ["x:Token".to_string()].into();
+        assert!(apply_edit(&mut raw, &record, &keys).is_err());
+        assert_eq!(raw.0, note);
 
         // Well-formed metadata is fine, and goes with an entry Proton removed.
         let item = login(
