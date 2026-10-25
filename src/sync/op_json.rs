@@ -31,6 +31,9 @@ const CUSTOM_SECTION_LABEL: &str = "Proton Pass custom fields";
 /// The field holding the Proton item's `share_id/item_id`, so a lost state
 /// file can be rebuilt. Not a secret.
 pub const REF_FIELD_ID: &str = "pqsync-ref";
+/// Where a card expiry that is not a month of a year goes: 1Password's
+/// month/year field would refuse it.
+const EXPIRY_TEXT_ID: &str = "pqsync-expiration_date";
 
 /// An item's raw JSON from `op`. It holds secrets.
 #[derive(Clone)]
@@ -309,6 +312,8 @@ pub fn parse_item(json: &str) -> Result<Option<OpItem>> {
         let id = str_of(field, "id");
         if id == REF_FIELD_ID {
             proton_ref = Some(value.to_string());
+        } else if id == EXPIRY_TEXT_ID && kind == Kind::CreditCard {
+            record.set("expiration_date", value, FieldKind::Text);
         } else if let Some(slot) = slots.iter().find(|slot| slot.id == id) {
             let value = if slot.key == "expiration_date" {
                 normalize_expiry(value).unwrap_or_else(|| value.to_string())
@@ -441,18 +446,48 @@ pub fn apply_edit(raw: &mut RawItem, record: &Record, keys: &BTreeSet<String>) {
 }
 
 fn write_slot(raw: &mut Value, slot: &Slot, value: &str) {
-    let value = if slot.key == "expiration_date" {
+    if slot.key != "expiration_date" {
+        return set_slot(raw, slot, value.to_string());
+    }
+    match normalize_expiry(value) {
         // The form op takes for a month/year field.
-        normalize_expiry(value).map_or_else(|| value.to_string(), |ym| ym.replace('-', "/"))
-    } else {
-        value.to_string()
-    };
+        Some(year_month) => {
+            remove_field(raw, EXPIRY_TEXT_ID);
+            set_slot(raw, slot, year_month.replace('-', "/"));
+        }
+        None if !value.is_empty() => {
+            set_slot(raw, slot, String::new());
+            let text = Slot::new(
+                "expiration_date",
+                EXPIRY_TEXT_ID,
+                OWN_SECTION,
+                "STRING",
+                "expiry date",
+                FieldKind::Text,
+            );
+            set_slot(raw, &text, value.to_string());
+        }
+        None => {
+            remove_field(raw, EXPIRY_TEXT_ID);
+            set_slot(raw, slot, String::new());
+        }
+    }
+}
+
+fn remove_field(raw: &mut Value, id: &str) {
+    fields_mut(raw).retain(|field| str_of(field, "id") != id);
+}
+
+/// Set, add or clear the field of `slot`.
+fn set_slot(raw: &mut Value, slot: &Slot, value: String) {
     let fields = fields_mut(raw);
     if let Some(index) = fields
         .iter()
         .position(|field| str_of(field, "id") == slot.id)
     {
-        if value.is_empty() && slot.section.is_some() {
+        // pq-sync's own fields go; a built-in one (even in a section, like
+        // a card's PIN) is emptied, so the item keeps its shape.
+        if value.is_empty() && slot.section == OWN_SECTION {
             fields.remove(index);
         } else {
             // A built-in field is emptied, not removed.
@@ -483,6 +518,7 @@ fn write_custom(raw: &mut Value, slots: &[Slot], name: &str, field: Option<&supe
     let is_custom = |candidate: &Value| {
         let id = str_of(candidate, "id");
         id != REF_FIELD_ID
+            && id != EXPIRY_TEXT_ID
             && !slots.iter().any(|slot| slot.id == id)
             && candidate.get("value").is_none_or(Value::is_string)
             && custom_name(candidate) == name
@@ -825,6 +861,82 @@ mod tests {
         let sections = raw.0["sections"].as_array().unwrap();
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0]["id"], SECTION_ID);
+    }
+
+    #[test]
+    fn clearing_a_built_in_field_in_a_section_empties_it() {
+        let mut card = Record::new(Kind::CreditCard);
+        card.set("title", "Card", FieldKind::Text);
+        card.set("pin", "0000", FieldKind::Concealed);
+        let mut identity = Record::new(Kind::Identity);
+        identity.set("title", "Me", FieldKind::Text);
+        identity.set("first_name", "Ada", FieldKind::Text);
+        for (record, key, id) in [(card, "pin", "pin"), (identity, "first_name", "firstname")] {
+            let returned = as_returned(&create_json(&record, "s/x"), json!([]));
+            let mut raw = parse_item(&returned).unwrap().unwrap().raw;
+            let mut cleared = record.clone();
+            cleared.set(key, "", FieldKind::Text);
+            let keys: BTreeSet<String> = [key.to_string()].into();
+            apply_edit(&mut raw, &cleared, &keys);
+            let field = raw.0["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["id"] == id)
+                .unwrap_or_else(|| panic!("built-in {id} was removed"))
+                .clone();
+            assert_eq!(field["value"], "");
+            assert!(
+                parse_item(&raw.0.to_string())
+                    .unwrap()
+                    .unwrap()
+                    .record
+                    .get(key)
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn an_expiry_that_is_not_a_month_goes_to_a_text_field() {
+        let mut card = Record::new(Kind::CreditCard);
+        card.set("title", "Card", FieldKind::Text);
+        card.set("expiration_date", "someday", FieldKind::Text);
+        let created: Value = serde_json::from_str(create_json(&card, "s/c").expose()).unwrap();
+        let fields = created["fields"].as_array().unwrap();
+        assert!(
+            !fields
+                .iter()
+                .any(|f| f["type"] == "MONTH_YEAR" && f["value"] == "someday"),
+            "{fields:?}"
+        );
+        let returned = as_returned(&create_json(&card, "s/c"), json!([]));
+        let item = parse_item(&returned).unwrap().unwrap();
+        assert_eq!(item.record.value("expiration_date"), "someday");
+
+        // A valid expiry later replaces the text field with the month field.
+        let mut raw = item.raw;
+        card.set("expiration_date", "2027-12", FieldKind::Text);
+        let keys: BTreeSet<String> = ["expiration_date".to_string()].into();
+        apply_edit(&mut raw, &card, &keys);
+        let fields = raw.0["fields"].as_array().unwrap();
+        assert!(
+            fields
+                .iter()
+                .any(|f| f["id"] == "expiry" && f["value"] == "2027/12")
+        );
+        assert!(
+            !fields.iter().any(|f| f["value"] == "someday"),
+            "{fields:?}"
+        );
+        assert_eq!(
+            parse_item(&raw.0.to_string())
+                .unwrap()
+                .unwrap()
+                .record
+                .value("expiration_date"),
+            "2027-12"
+        );
     }
 
     #[test]
