@@ -17,7 +17,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 use super::record::{FieldHash, Kind, keyed_hash};
-use super::secret::parse_json;
+use crate::json::parse_json;
 use crate::private_file::{ensure_private_dir, read_private, write_private};
 
 /// Bumped when the meaning of a field changes; an older file is refused,

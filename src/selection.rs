@@ -65,7 +65,7 @@ pub fn select_item(matches: Vec<Match>, always_ask: bool) -> Result<Match> {
             }
 
             // Parse selected index from "index|[vault] title — username"
-            let selected = String::from_utf8(output.stdout)?;
+            let selected = crate::json::utf8(output.stdout, "fzf's selection")?;
             let index: usize = selected
                 .split('|')
                 .next()

@@ -145,6 +145,9 @@ item-view)
             echo "Error: Field does not exist: $field" >&2
             exit 1
         fi
+    elif [ "$output" = json ] && [ -f "$dir/replace/item-view.$item" ]; then
+        # replace/item-view.<item-id>: answer with this JSON instead.
+        cat "$dir/replace/item-view.$item"
     elif [ "$output" = json ]; then
         cat "$dir/views/$share/$item.json"
     else

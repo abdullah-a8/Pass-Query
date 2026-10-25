@@ -6,6 +6,7 @@
 
 pub mod cache;
 pub mod clipboard;
+pub mod json;
 pub mod lookup;
 pub mod models;
 pub mod pass_cli;

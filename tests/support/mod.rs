@@ -204,6 +204,13 @@ impl Harness {
         .unwrap();
     }
 
+    /// Make `pass-cli item view --output json` print `json` for one item.
+    pub fn replace_view(&self, item_id: &str, json: &str) {
+        let dir = self.fake_dir().join("replace");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(format!("item-view.{item_id}")), json).unwrap();
+    }
+
     /// Make `pass-cli item view` fail for one item only.
     pub fn fail_item(&self, item_id: &str, stderr: &str) {
         let dir = self.fake_dir().join("fail");
