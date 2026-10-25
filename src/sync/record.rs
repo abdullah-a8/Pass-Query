@@ -126,7 +126,13 @@ impl Record {
         let mut key = base.clone();
         let mut n = 2;
         while self.fields.contains_key(&key) {
-            key = format!("{base} #{n}");
+            // An unnamed field's numbered name is "#2", with no leading space
+            // a reader would trim.
+            key = if name.is_empty() {
+                format!("{base}#{n}")
+            } else {
+                format!("{base} #{n}")
+            };
             n += 1;
         }
         self.fields.insert(key.clone(), Field { value, kind });

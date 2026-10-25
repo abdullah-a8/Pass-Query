@@ -355,6 +355,7 @@ fn bind(raw: &Value, kind: Kind, slots: &[Slot]) -> Result<(Record, Binding, Opt
     let mut binding = Binding::default();
     let mut reference = None;
     let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut custom_names: BTreeSet<String> = BTreeSet::new();
     for (index, field) in fields.iter().enumerate() {
         let id = str_of(field, "id");
         let section = section_id(field);
@@ -378,6 +379,12 @@ fn bind(raw: &Value, kind: Kind, slots: &[Slot]) -> Result<(Record, Binding, Opt
         } else if id == EXPIRY_TEXT_ID && in_own_section(field) && kind == Kind::CreditCard {
             binding.expiry_text = Some(index);
             if let Some(value) = value.filter(|value| !value.is_empty()) {
+                // Two expiries, in the month field and in the text one:
+                // which is meant is unclear.
+                if record.get("expiration_date").is_some() {
+                    binding.ambiguous = true;
+                }
+                let value = normalize_expiry(value).unwrap_or_else(|| value.to_string());
                 record.set("expiration_date", value, FieldKind::Text);
             }
         } else if let Some(slot) = slot {
@@ -385,20 +392,27 @@ fn bind(raw: &Value, kind: Kind, slots: &[Slot]) -> Result<(Record, Binding, Opt
             let Some(value) = value.filter(|value| !value.is_empty()) else {
                 continue;
             };
+            if slot.key == "expiration_date" && record.get("expiration_date").is_some() {
+                binding.ambiguous = true;
+            }
             let value = match slot.key {
                 "expiration_date" => normalize_expiry(value).unwrap_or_else(|| value.to_string()),
                 "number" => normalize_card_number(value),
                 _ => value.to_string(),
             };
             record.set(slot.key, value, slot.kind);
-        } else if let Some(value) = value.filter(|value| !value.is_empty())
-            && let Some(key) = record.add_custom(
-                &custom_name(field),
-                value,
-                kind_of_type(str_of(field, "type")),
-            )
-        {
-            binding.custom.insert(key, index);
+        } else if let Some(value) = value.filter(|value| !value.is_empty()) {
+            let name = custom_name(field);
+            // Two fields of one name are numbered on reading, and removing
+            // one renumbers the rest: which field a key means could shift
+            // under an edit, so such an item is not edited.
+            if !custom_names.insert(name.trim().to_string()) {
+                binding.ambiguous = true;
+            }
+            if let Some(key) = record.add_custom(&name, value, kind_of_type(str_of(field, "type")))
+            {
+                binding.custom.insert(key, index);
+            }
         }
     }
     if binding.ambiguous {
@@ -557,11 +571,15 @@ pub fn apply_edit(raw: &mut RawItem, record: &Record, keys: &BTreeSet<String>) -
                     let op_type = match field.kind {
                         FieldKind::Concealed => "CONCEALED",
                         FieldKind::Totp => "OTP",
-                        // Text keeps a richer text type (EMAIL, URL, ...).
-                        FieldKind::Text | FieldKind::Urls => match current {
-                            "" | "CONCEALED" | "OTP" => "STRING",
-                            other => other,
-                        },
+                        // Text keeps a richer text type (EMAIL, URL, ...), never
+                        // one that reads as concealed or a code.
+                        FieldKind::Text | FieldKind::Urls => {
+                            if current.is_empty() || kind_of_type(current) != FieldKind::Text {
+                                "STRING"
+                            } else {
+                                current
+                            }
+                        }
                     };
                     changes.push(Change::Set {
                         index,
@@ -1091,7 +1109,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_custom_names_are_edited_and_removed_as_they_were_read() {
+    fn duplicate_custom_names_are_read_numbered_and_never_edited() {
         let mut raw = note_with(json!([
             custom_field("a", "dup", "first"),
             custom_field("b", "dup", "second"),
@@ -1101,25 +1119,19 @@ mod tests {
         assert_eq!(item.record.value("x:dup"), "first");
         assert_eq!(item.record.value("x:dup #2"), "second");
         assert_eq!(item.record.value("x:dup #2 #2"), "literal");
+        assert!(item.ambiguous);
 
         let mut record = item.record.clone();
         record.set("x:dup #2", "changed", FieldKind::Text);
         let keys: BTreeSet<String> = ["x:dup #2".to_string()].into();
-        apply_edit(&mut raw, &record, &keys).unwrap();
+        assert!(apply_edit(&mut raw, &record, &keys).is_err());
         assert_eq!(
             values_by_id(&raw),
             [
                 ("a".into(), "first".into()),
-                ("b".into(), "changed".into()),
+                ("b".into(), "second".into()),
                 ("c".into(), "literal".into())
             ]
-        );
-
-        record.set("x:dup #2", "", FieldKind::Text);
-        apply_edit(&mut raw, &record, &keys).unwrap();
-        assert_eq!(
-            values_by_id(&raw),
-            [("a".into(), "first".into()), ("c".into(), "literal".into())]
         );
     }
 
@@ -1217,5 +1229,71 @@ mod tests {
         record.set("password", "three", FieldKind::Concealed);
         let keys: BTreeSet<String> = ["password".to_string()].into();
         assert!(apply_edit(&mut raw, &record, &keys).is_err());
+    }
+
+    #[test]
+    fn unnamed_duplicate_custom_fields_round_trip() {
+        let mut note = Record::new(Kind::Note);
+        note.set("title", "N", FieldKind::Text);
+        note.add_custom("", "one", FieldKind::Text);
+        note.add_custom("", "two", FieldKind::Concealed);
+        let returned = as_returned(&create_json(&note, "s/n"), json!([]));
+        let item = parse_item(&returned).unwrap().unwrap();
+        assert_eq!(item.record, note);
+        assert!(!item.ambiguous);
+    }
+
+    #[test]
+    fn duplicate_custom_names_make_an_item_ambiguous() {
+        let raw = note_with(json!([
+            custom_field("a", "dup", "first"),
+            custom_field("b", " dup ", "second"),
+        ]));
+        let item = parse_item(&raw.0.to_string()).unwrap().unwrap();
+        assert!(item.ambiguous);
+        let mut record = item.record.clone();
+        record.set("x:dup", "", FieldKind::Text);
+        let keys: BTreeSet<String> = ["x:dup".to_string()].into();
+        let mut raw = raw;
+        assert!(apply_edit(&mut raw, &record, &keys).is_err());
+    }
+
+    #[test]
+    fn a_custom_field_edited_to_text_loses_a_concealed_type() {
+        let mut raw = note_with(json!([
+            { "id": "c", "type": "CREDIT_CARD_NUMBER", "label": "Card", "value": "4111" },
+            { "id": "e", "type": "EMAIL", "label": "Mail", "value": "a@b.c" },
+        ]));
+        let mut record = parse_item(&raw.0.to_string()).unwrap().unwrap().record;
+        record.set("x:Card", "plain text", FieldKind::Text);
+        record.set("x:Mail", "d@e.f", FieldKind::Text);
+        let keys: BTreeSet<String> = ["x:Card".to_string(), "x:Mail".to_string()].into();
+        apply_edit(&mut raw, &record, &keys).unwrap();
+        let reread = parse_item(&raw.0.to_string()).unwrap().unwrap().record;
+        assert_eq!(reread.get("x:Card").unwrap().kind, FieldKind::Text);
+        assert_eq!(
+            raw.0["fields"][1]["type"], "EMAIL",
+            "a richer text type stays"
+        );
+    }
+
+    #[test]
+    fn the_expiry_text_field_reads_like_the_month_field_and_both_is_ambiguous() {
+        let text = |value: &str| {
+            json!({ "id": EXPIRY_TEXT_ID, "type": "STRING", "label": "expiry date",
+            "value": value, "section": { "id": SECTION_ID, "label": "Proton Pass" } })
+        };
+        let card = |fields: Value| {
+            let raw = json!({ "id": "c", "title": "C", "category": "CREDIT_CARD", "version": 1, "fields": fields });
+            parse_item(&raw.to_string()).unwrap().unwrap()
+        };
+        let only_text = card(json!([text("12/2027")]));
+        assert_eq!(only_text.record.value("expiration_date"), "2027-12");
+        assert!(!only_text.ambiguous);
+        let both = card(json!([
+            text("someday"),
+            { "id": "expiry", "type": "MONTH_YEAR", "label": "expiry date", "value": "2027/12" },
+        ]));
+        assert!(both.ambiguous);
     }
 }
