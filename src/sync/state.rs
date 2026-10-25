@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::record::{FieldHash, Kind, keyed_hash};
 use super::secret::parse_json;
@@ -180,20 +180,10 @@ fn key_check(key: &[u8]) -> String {
     keyed_hash(key, "key check", b"")
 }
 
-/// `$XDG_STATE_HOME/pq-sync/state.json`, else `~/.local/state/pq-sync/state.json`.
-pub fn default_path() -> Result<PathBuf> {
-    let dir = match std::env::var_os("XDG_STATE_HOME").filter(|dir| !dir.is_empty()) {
-        Some(dir) => PathBuf::from(dir),
-        None => PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?)
-            .join(".local")
-            .join("state"),
-    };
-    Ok(dir.join("pq-sync").join("state.json"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     const KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
 
