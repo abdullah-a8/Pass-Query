@@ -17,7 +17,7 @@ use super::api::{ProtonApi, ProtonSummary, Vault};
 use super::exec::{Command, Output};
 use super::proton_json::{self, CreateTemplate, ProtonItem};
 use super::secret::{SecretString, parse_json};
-use crate::pass_cli::{SessionProblem, failure, item_is_gone};
+use crate::pass_cli::{SessionProblem, failure, item_is_certainly_gone};
 use crate::text::printable;
 
 /// How long one pass-cli call may take: a vault's items are downloaded and
@@ -210,7 +210,7 @@ impl ProtonApi for Proton {
             .run()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            if SessionProblem::from_stderr(&stderr).is_none() && item_is_gone(&stderr) {
+            if SessionProblem::from_stderr(&stderr).is_none() && item_is_certainly_gone(&stderr) {
                 return Ok(None);
             }
             return Err(failure("pass-cli item view", &output.stderr));
@@ -250,7 +250,7 @@ impl ProtonApi for Proton {
             return Ok(());
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if SessionProblem::from_stderr(&stderr).is_none() && item_is_gone(&stderr) {
+        if SessionProblem::from_stderr(&stderr).is_none() && item_is_certainly_gone(&stderr) {
             return Ok(());
         }
         Err(failure("pass-cli item trash", &output.stderr))

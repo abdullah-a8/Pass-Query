@@ -110,13 +110,21 @@ impl std::error::Error for ItemUnavailable {}
 /// it, or a bare HTTP status when pass-cli printed only that (it does for
 /// item revisions).
 pub fn item_is_gone(stderr: &str) -> bool {
-    const MARKERS: [&str; 6] = [
+    item_is_certainly_gone(stderr)
+        || ["Invalid status code: 403", "Invalid status code: 422"]
+            .iter()
+            .any(|marker| stderr.contains(marker))
+}
+
+/// Whether a failed item command says, beyond doubt, that the item or its
+/// vault is gone. A bare 403 or 422 does not: pq-sync, which would take the
+/// item for deleted, uses this one.
+pub fn item_is_certainly_gone(stderr: &str) -> bool {
+    const MARKERS: [&str; 4] = [
         "Reason: NotExists",
         "Reason: DeletedShare",
-        "Invalid status code: 403",
         "Invalid status code: 404",
         "Invalid status code: 410",
-        "Invalid status code: 422",
     ];
     MARKERS.iter().any(|marker| stderr.contains(marker))
         || stderr
@@ -485,6 +493,14 @@ mod tests {
             "Error: Invalid status code: 401 Unauthorized"
         ));
         assert!(!item_is_gone("Error: Error opening item"));
+
+        // A bare 403 or 422 may not mean the item is gone: pq searches again,
+        // pq-sync must not take it for a deletion.
+        for maybe in ["Invalid status code: 403", "Invalid status code: 422"] {
+            assert!(item_is_gone(maybe) && !item_is_certainly_gone(maybe));
+        }
+        assert!(item_is_certainly_gone("Reason: NotExists"));
+        assert!(item_is_certainly_gone("Invalid status code: 404"));
         assert!(!item_is_gone("Reason: NotAllowed"));
     }
 
