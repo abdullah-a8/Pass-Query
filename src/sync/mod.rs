@@ -4,6 +4,8 @@
 //! - [`record`]: the canonical item both sides map to, and keyed field hashes.
 //! - [`proton_json`]: pass-cli's item JSON and create templates.
 //! - [`op_json`]: op's item JSON, create JSON and in-place edits.
+//! - [`engine`]: one sync run over both sides.
+//! - [`report`]: what a run did and what it needs from the owner.
 //! - [`api`]: what the engine needs from each side, as traits.
 //! - [`proton`]: the `pass-cli` adapter.
 //! - [`onepassword`]: the `op` adapter.
@@ -13,13 +15,17 @@
 //! - [`state`]: the private state file: pairs, change markers, field hashes.
 
 pub mod api;
+pub mod engine;
+mod engine_tests;
 pub mod exec;
 mod fake_cli;
+mod memory;
 pub mod merge;
 pub mod onepassword;
 pub mod op_json;
 pub mod proton;
 pub mod proton_json;
 pub mod record;
+pub mod report;
 pub mod secret;
 pub mod state;

@@ -72,9 +72,6 @@ pub struct ItemPair {
     /// Each field's keyed hash at the last point both sides agreed.
     #[serde(default)]
     pub base: BTreeMap<String, FieldHash>,
-    /// `op_json::visible_fingerprint` of the 1Password item at the last sync.
-    #[serde(default)]
-    pub op_visible: String,
     /// Fields Proton could not receive when the item came from 1Password.
     #[serde(default)]
     pub proton_missing: BTreeSet<String>,
@@ -211,7 +208,6 @@ mod tests {
             proton_modified: "2026-10-25T00:00:00".into(),
             op_version: 3,
             base: BTreeMap::from([("title".to_string(), "ab".repeat(32))]),
-            op_visible: "cd".repeat(32),
             proton_missing: BTreeSet::from(["note".to_string()]),
             op_guarded: false,
             reported: BTreeMap::new(),
