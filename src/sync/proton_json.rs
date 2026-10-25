@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
 use super::record::{FieldKind, Kind, Record, normalize_card_number, normalize_expiry};
-use super::secret::SecretString;
+use super::secret::{SecretString, parse_json};
 
 /// A Proton item read with its secrets.
 #[derive(Debug)]
@@ -40,8 +40,7 @@ pub fn kind_of_summary(item_type: &str) -> Option<Kind> {
 /// Parse `item view --output json`. `Ok(None)` for kinds pq-sync does not
 /// carry.
 pub fn parse_view(json: &str) -> Result<Option<ProtonItem>> {
-    // serde_json's errors quote no input, only positions.
-    let root: Value = serde_json::from_str(json).context("item view output is not JSON")?;
+    let root: Value = parse_json(json, "item view output")?;
     let item = root.get("item").context("item view output has no item")?;
     let data = item
         .get("content")
