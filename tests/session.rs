@@ -3,7 +3,7 @@
 
 mod support;
 
-use support::{Harness, Login, stderr, stdout};
+use support::{Harness, Login, PATIENCE, STALL, stderr, stdout};
 
 const GITHUB: Login = Login {
     id: "item-github",
@@ -162,7 +162,7 @@ fn a_session_problem_is_reported_without_waiting_for_slow_vaults() {
     let mut h = personal_vault();
     h.vault("Slow", "share-slow");
     h.fail_vault("share-personal", LOCKED);
-    h.slow_vault("share-slow", 10);
+    h.slow_vault("share-slow", STALL);
 
     let started = std::time::Instant::now();
     let out = h.run(&["github", "-p"]);
@@ -174,10 +174,7 @@ fn a_session_problem_is_reported_without_waiting_for_slow_vaults() {
         "{}",
         stderr(&out)
     );
-    assert!(
-        took < std::time::Duration::from_secs(5),
-        "waited {took:?} for a slow vault"
-    );
+    assert!(took < PATIENCE, "waited {took:?} for a slow vault");
 }
 
 #[test]
@@ -252,7 +249,7 @@ fn a_session_problem_while_labelling_is_reported_without_waiting_for_slow_lookup
             ..GITHUB
         },
     );
-    h.slow_item("item-github", 10);
+    h.slow_item("item-github", STALL);
     h.fail_item("item-github-work", LOCKED);
 
     let started = std::time::Instant::now();
@@ -265,10 +262,7 @@ fn a_session_problem_while_labelling_is_reported_without_waiting_for_slow_lookup
         "{}",
         stderr(&out)
     );
-    assert!(
-        took < std::time::Duration::from_secs(5),
-        "waited {took:?} for a slow lookup"
-    );
+    assert!(took < PATIENCE, "waited {took:?} for a slow lookup");
 }
 
 #[test]

@@ -5,7 +5,7 @@
 mod support;
 
 use std::time::Duration;
-use support::{Harness, Login, eventually, stderr, stdout};
+use support::{Harness, Login, PATIENCE, eventually, stderr, stdout};
 
 const GITHUB: Login = Login {
     id: "item-github",
@@ -39,7 +39,7 @@ fn the_password_is_copied_only_after_enter() {
     let mut pq = h.spawn(&["github", "--clear-after", "0"]);
 
     assert!(
-        eventually(5 * SECOND, || h.copies().len() == 1),
+        eventually(PATIENCE, || h.copies().len() == 1),
         "username copied"
     );
     std::thread::sleep(Duration::from_millis(300));
@@ -100,11 +100,7 @@ fn a_clipboard_tool_left_serving_the_selection_does_not_hold_pq_output_open() {
 
     // run() reads stdout and stderr to the end, as a script capturing them would.
     assert!(out.status.success(), "stderr: {}", stderr(&out));
-    assert!(
-        started.elapsed() < 3 * SECOND,
-        "took {:?}",
-        started.elapsed()
-    );
+    assert!(started.elapsed() < PATIENCE, "took {:?}", started.elapsed());
 }
 
 #[test]
@@ -218,7 +214,7 @@ mod linux {
         let out = h.run(&["wifi", "--clear-after", "1"]);
 
         assert!(out.status.success(), "stderr: {}", stderr(&out));
-        assert!(eventually(5 * SECOND, || h.clipboard_now().is_empty()));
+        assert!(eventually(PATIENCE, || h.clipboard_now().is_empty()));
     }
 }
 
@@ -245,7 +241,7 @@ fn the_password_is_cleared_after_the_delay() {
     // pq has exited; a detached helper clears the clipboard.
     assert_eq!(h.clipboard_now(), "wifi-secret");
     assert!(
-        eventually(5 * SECOND, || h.clipboard_now().is_empty()),
+        eventually(PATIENCE, || h.clipboard_now().is_empty()),
         "clipboard still holds {:?}",
         h.clipboard_now()
     );
@@ -256,12 +252,12 @@ fn the_password_is_cleared_even_if_pq_dies_while_copying_it() {
     let h = harness();
     h.hang_after_copy();
     let pq = h.spawn(&["wifi", "--clear-after", "1"]);
-    assert!(eventually(5 * SECOND, || h.clipboard_now() == "wifi-secret"));
+    assert!(eventually(PATIENCE, || h.clipboard_now() == "wifi-secret"));
 
     pq.kill();
 
     assert!(
-        eventually(5 * SECOND, || h.clipboard_now().is_empty()),
+        eventually(PATIENCE, || h.clipboard_now().is_empty()),
         "the clear helper was already running"
     );
 }
@@ -277,7 +273,7 @@ fn a_copy_slower_than_the_delay_is_still_cleared() {
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     assert_eq!(h.clipboard_now(), "wifi-secret");
     assert!(
-        eventually(5 * SECOND, || h.clipboard_now().is_empty()),
+        eventually(PATIENCE, || h.clipboard_now().is_empty()),
         "cleared a delay after the copy finished"
     );
 }
@@ -288,12 +284,12 @@ fn a_copy_that_lands_late_and_hangs_is_still_cleared() {
     h.slow_copy(3);
     h.hang_after_copy();
     let pq = h.spawn(&["wifi", "--clear-after", "2"]);
-    assert!(eventually(6 * SECOND, || h.clipboard_now() == "wifi-secret"));
+    assert!(eventually(PATIENCE, || h.clipboard_now() == "wifi-secret"));
 
     pq.kill();
 
     assert!(
-        eventually(5 * SECOND, || h.clipboard_now().is_empty()),
+        eventually(PATIENCE, || h.clipboard_now().is_empty()),
         "checked again after the late copy"
     );
 }
@@ -306,13 +302,13 @@ fn a_hung_clipboard_read_is_stopped_so_the_helper_ends() {
     let out = h.run(&["wifi", "--clear-after", "1"]);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     assert!(
-        eventually(5 * SECOND, || pid_file.exists()),
+        eventually(PATIENCE, || pid_file.exists()),
         "the helper read the clipboard"
     );
     let pid = std::fs::read_to_string(&pid_file).unwrap();
 
     assert!(
-        eventually(10 * SECOND, || !alive(&pid)),
+        eventually(PATIENCE, || !alive(&pid)),
         "the hung read was killed"
     );
 }
@@ -335,15 +331,12 @@ fn a_clipboard_read_whose_output_stays_open_does_not_hold_the_helper() {
     let out = h.run(&["wifi", "--clear-after", "1"]);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     assert!(
-        eventually(5 * SECOND, || pid_file.exists()),
+        eventually(PATIENCE, || pid_file.exists()),
         "the helper read the clipboard"
     );
     let helper = std::fs::read_to_string(&pid_file).unwrap();
 
-    assert!(
-        eventually(10 * SECOND, || !alive(&helper)),
-        "the helper ended"
-    );
+    assert!(eventually(PATIENCE, || !alive(&helper)), "the helper ended");
 }
 
 #[test]
