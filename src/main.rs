@@ -4,18 +4,9 @@ use colored::Colorize;
 use std::io::{BufRead, IsTerminal};
 use std::time::Duration;
 
-mod cache;
-mod clipboard;
-mod lookup;
-mod models;
-mod pass_cli;
-mod process;
-mod search;
-mod selection;
-mod text;
-
-use clipboard::Clipboard;
-use lookup::Credentials;
+use pq::clipboard::{self, Clipboard};
+use pq::lookup::{self, Credentials};
+use pq::{process, text};
 
 /// Fast Proton Pass password search with intelligent caching
 #[derive(Parser)]
