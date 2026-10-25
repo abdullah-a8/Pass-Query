@@ -943,7 +943,7 @@ impl Engine<'_> {
             proton_share: run.proton.id.clone(),
             proton_item: proton_id.to_string(),
             op_vault: run.op.id.clone(),
-            op_item: created.raw.0["id"].as_str().unwrap_or_default().to_string(),
+            op_item: created.id.clone(),
             proton_modified: run.proton_items[proton_id].modified.clone(),
             op_version: version_of(&created.raw),
             base: proton_hashes,
