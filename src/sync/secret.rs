@@ -18,6 +18,18 @@ impl SecretString {
     }
 }
 
+impl From<&str> for SecretString {
+    fn from(value: &str) -> Self {
+        SecretString::new(value)
+    }
+}
+
+impl From<String> for SecretString {
+    fn from(value: String) -> Self {
+        SecretString::new(value)
+    }
+}
+
 impl fmt::Debug for SecretString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("SecretString([REDACTED])")
