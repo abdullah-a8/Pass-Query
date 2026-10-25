@@ -47,8 +47,16 @@ enum Command {
         #[arg(long, value_name = "URL")]
         proton_proxy: Option<String>,
         /// Ask for the tokens again even if they are stored
-        #[arg(long)]
+        #[arg(long, conflicts_with = "as_me")]
         replace: bool,
+        /// Create missing "Proton · <vault>" vaults in 1Password (the
+        /// service account must be allowed to create vaults)
+        #[arg(long)]
+        create_vaults: bool,
+        /// No tokens: check both sides with your own sign-ins, for
+        /// `pq-sync run --as-me`
+        #[arg(long)]
+        as_me: bool,
     },
     /// Sync once
     Run {
@@ -61,8 +69,9 @@ enum Command {
         /// Allow archiving or trashing many items of a vault in one run
         #[arg(long)]
         allow_mass_delete: bool,
-        /// Use your own 1Password sign-in (desktop app) instead of the
-        /// service account: for a first large copy, at the keyboard
+        /// Use your own sign-ins, the 1Password app and your pass-cli
+        /// login, instead of pq-sync's tokens, and create missing vaults:
+        /// at the keyboard
         #[arg(long)]
         as_me: bool,
     },
@@ -112,7 +121,9 @@ fn dispatch(command: Command) -> Result<()> {
         Command::Setup {
             proton_proxy,
             replace,
-        } => setup(proton_proxy, replace),
+            create_vaults,
+            as_me,
+        } => setup(proton_proxy, replace, create_vaults, as_me),
         Command::Run {
             dry_run,
             quiet,
@@ -121,6 +132,15 @@ fn dispatch(command: Command) -> Result<()> {
         } => run(dry_run, quiet, allow_mass_delete, as_me),
         Command::Status { clear } => status(clear),
         Command::InstallAgent { interval } => {
+            for secret in [Secret::ProtonToken, Secret::OpToken] {
+                if secrets::get(secret)?.is_none() {
+                    bail!(
+                        "the agent syncs with pq-sync's own tokens, and no {} is stored: run \
+                         `pq-sync setup` first, or keep syncing by hand with `pq-sync run --as-me`",
+                        secret.describe()
+                    );
+                }
+            }
             let program = std::env::current_exe()
                 .and_then(|path| path.canonicalize())
                 .context("Failed to find the pq-sync program")?;
@@ -273,15 +293,30 @@ fn proxy_host_port(proxy: &str) -> &str {
         .map_or(authority, |(_, host)| host)
 }
 
-fn proton(config: &Config, dir: &Path) -> Result<Proton> {
-    let session_dir = dir.join("proton-session");
-    ensure_private_dir(&session_dir, "Proton session")?;
+/// The Proton side: pq-sync's own session and token, or with `as_me` the
+/// owner's own pass-cli login.
+fn proton(config: &Config, dir: &Path, as_me: bool) -> Result<Proton> {
+    let (session_dir, token) = if as_me {
+        (None, None)
+    } else {
+        let session_dir = dir.join("proton-session");
+        ensure_private_dir(&session_dir, "Proton session")?;
+        (Some(session_dir), secrets::get(Secret::ProtonToken)?)
+    };
     Ok(Proton {
         program: PathBuf::from(&config.pass_cli),
         session_dir,
         proxy: (!config.proton_proxy.is_empty()).then(|| config.proton_proxy.clone()),
-        token: secrets::get(Secret::ProtonToken)?,
+        token,
     })
+}
+
+/// `--as-me` asks the 1Password app, which may prompt: only at a terminal.
+fn at_the_keyboard() -> Result<()> {
+    if !std::io::stdin().is_terminal() {
+        bail!("--as-me uses your own sign-ins, which may ask you: run it at the keyboard");
+    }
+    Ok(())
 }
 
 fn run(dry_run: bool, quiet: bool, allow_mass_delete: bool, as_me: bool) -> Result<()> {
@@ -299,14 +334,14 @@ fn run(dry_run: bool, quiet: bool, allow_mass_delete: bool, as_me: bool) -> Resu
     let state_path = dir.join("state.json");
     let mut state = State::load(&state_path, &key)?;
 
+    if as_me {
+        at_the_keyboard()?;
+    }
     check_proxy(&config.proton_proxy)?;
-    let mut proton = proton(&config, &dir)?;
+    let mut proton = proton(&config, &dir, as_me)?;
     proton.ensure_session()?;
 
     let token = if as_me {
-        if !std::io::stdin().is_terminal() {
-            bail!("--as-me signs in through the 1Password app: run it at the keyboard");
-        }
         None
     } else {
         Some(
@@ -322,9 +357,11 @@ fn run(dry_run: bool, quiet: bool, allow_mass_delete: bool, as_me: bool) -> Resu
     settings.dry_run = dry_run;
     settings.allow_mass_delete = allow_mass_delete;
     if as_me {
-        // An owner's own sign-in is not held to a service account's quota.
+        // An owner's own sign-in is not held to a service account's quota,
+        // and may create the vaults it needs.
         settings.op_requests_per_day = usize::MAX / 2;
         settings.op_writes_per_run = usize::MAX / 2;
+        settings.create_op_vaults = true;
     }
     let mut save = |state: &State| state.save(&state_path);
     let (report, result) = engine::run(
@@ -384,7 +421,35 @@ fn which(program: &str) -> Option<PathBuf> {
         })
 }
 
-fn setup(proton_proxy: Option<String>, replace: bool) -> Result<()> {
+/// The tokens setup asks for: what each is, how to make it, its prefix.
+const TOKENS: [(Secret, &str, &str); 2] = [
+    (
+        Secret::ProtonToken,
+        "Create one with `pass-cli personal-access-token create --name pq-sync \
+         --expiration 1y` (through the proxy where Proton is blocked), then grant it \
+         the editor role on each vault to sync (`pass-cli personal-access-token access \
+         grant --help`).",
+        "pst_",
+    ),
+    (
+        Secret::OpToken,
+        "First create the 1Password vaults it will fill (named \"Proton · <vault>\"), then \
+         a service account with read and write access to them (1Password.com > \
+         Developer > Service Accounts, or `op service-account create`; add \
+         `--can-create-vaults` for `setup --create-vaults`).",
+        "ops_",
+    ),
+];
+
+fn setup(
+    proton_proxy: Option<String>,
+    replace: bool,
+    create_vaults: bool,
+    as_me: bool,
+) -> Result<()> {
+    if as_me {
+        at_the_keyboard()?;
+    }
     let dir = state_dir()?;
     // Not while a run uses the session or the config.
     let _lock = RunLock::acquire(&dir.join("run.lock"))?;
@@ -401,27 +466,16 @@ fn setup(proton_proxy: Option<String>, replace: bool) -> Result<()> {
             }
         }
     }
+    if create_vaults {
+        config.create_op_vaults = true;
+    }
     config.save(&config_path)?;
     println!("Config: {}", config_path.display());
     secrets::state_key()?;
 
-    for (secret, how, prefix) in [
-        (
-            Secret::ProtonToken,
-            "Create one with `pass-cli personal-access-token create --name pq-sync \
-             --expiration 1y` (through the proxy where Proton is blocked), then grant it \
-             the editor role on each vault to sync (`pass-cli personal-access-token access \
-             grant --help`).",
-            "pst_",
-        ),
-        (
-            Secret::OpToken,
-            "First create the 1Password vaults it will fill (named \"Proton · <vault>\"), then \
-             a service account with read and write access to them (1Password.com > \
-             Developer > Service Accounts, or `op service-account create`).",
-            "ops_",
-        ),
-    ] {
+    // With your own sign-ins there are no tokens to store.
+    let tokens = if as_me { &[][..] } else { &TOKENS[..] };
+    for &(secret, how, prefix) in tokens {
         if !replace && secrets::get(secret)?.is_some() {
             println!(
                 "{} already stored (--replace to change it).",
@@ -452,11 +506,16 @@ fn setup(proton_proxy: Option<String>, replace: bool) -> Result<()> {
 
     println!("\nChecking both sides...");
     check_proxy(&config.proton_proxy)?;
-    let mut proton = proton(&config, &dir)?;
+    let mut proton = proton(&config, &dir, as_me)?;
     proton.ensure_session()?;
     let proton_vaults = proton.vaults()?;
-    let token = secrets::get(Secret::OpToken)?.context("no 1Password token stored")?;
-    let op_vaults = OnePassword::new(&config.op, Some(token)).vaults()?;
+    let token = if as_me {
+        None
+    } else {
+        Some(secrets::get(Secret::OpToken)?.context("no 1Password token stored")?)
+    };
+    let op_vaults = OnePassword::new(&config.op, token).vaults()?;
+    let created = as_me || config.create_op_vaults;
     for vault in &proton_vaults {
         let target = format!("{}{}", config.vault_prefix, vault.name);
         let found = op_vaults.iter().any(|v| v.name == target);
@@ -464,14 +523,21 @@ fn setup(proton_proxy: Option<String>, replace: bool) -> Result<()> {
             "  Proton '{}' -> 1Password '{}': {}",
             printable(&vault.name),
             printable(&target),
-            if found {
-                "ready"
-            } else {
-                "missing: create it and grant the service account"
+            match (found, created) {
+                (true, _) => "ready",
+                (false, true) => "missing: created on the first run",
+                (false, false) => "missing: create it and grant the service account",
             }
         );
     }
-    println!("\nNext: pq-sync run --dry-run, then pq-sync run, then pq-sync install-agent.");
+    if as_me {
+        println!(
+            "\nNext: pq-sync run --as-me --dry-run, then pq-sync run --as-me. Syncing in the \
+             background (install-agent) needs pq-sync's own tokens: pq-sync setup."
+        );
+    } else {
+        println!("\nNext: pq-sync run --dry-run, then pq-sync run, then pq-sync install-agent.");
+    }
     Ok(())
 }
 

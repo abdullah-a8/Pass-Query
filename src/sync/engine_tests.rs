@@ -782,3 +782,20 @@ fn requests_not_made_by_the_service_account_are_not_counted() {
     assert_eq!(w.state.op_requests_today(NOW), 0);
     assert_eq!(w.state.items.len(), 1, "the state is still saved");
 }
+
+#[test]
+fn a_dry_run_says_which_vaults_it_would_create() {
+    let mut w = World::new();
+    w.config.create_op_vaults = true;
+    w.config.dry_run = true;
+    w.proton.vault("ps2", "Work");
+    let report = w.sync();
+    assert!(
+        has(
+            &report,
+            |e| matches!(e, Event::Vault(m) if m.contains("would create 'Proton · Work'"))
+        ),
+        "{report}"
+    );
+    assert_eq!(w.op.vaults.len(), 1);
+}

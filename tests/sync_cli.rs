@@ -21,6 +21,7 @@ const FAKE_PASS_CLI: &str = r#"#!/bin/sh
 d="$FAKE_DIR"
 printf '%s\n' "pass-cli $*" >> "$d/args"
 printf '%s\n' "${PROTON_PASS_PERSONAL_ACCESS_TOKEN:-}" >> "$d/pass-cli-token-env"
+printf '%s\n' "${PROTON_PASS_SESSION_DIR:-unset}" >> "$d/pass-cli-session-env"
 env | grep '^PQ_SYNC_' >> "$d/leaked-env"
 case "$1 $2" in
 "info --output") echo '{"release_track":"stable","id":"u"}' ;;
@@ -39,7 +40,13 @@ printf '%s\n' "${OP_SERVICE_ACCOUNT_TOKEN:-}" >> "$d/op-token-env"
 env | grep '^PQ_SYNC_' >> "$d/leaked-env"
 mkdir -p "$d/items"
 case "$1 $2" in
-"vault list") echo '[{"id":"ov1","name":"Proton · Personal"}]' ;;
+"vault list")
+    if [ -f "$d/vaults.json" ]; then cat "$d/vaults.json"; else echo '[{"id":"ov1","name":"Proton · Personal"}]'; fi
+    ;;
+"vault create")
+    printf '[{"id":"ov1","name":"%s"}]' "$3" > "$d/vaults.json"
+    printf '{"id":"ov1","name":"%s"}' "$3"
+    ;;
 "item list")
     printf '['
     first=1
@@ -111,8 +118,31 @@ impl World {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        let output = Command::new(env!("CARGO_BIN_EXE_pq-sync"))
-            .args(args)
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pq-sync"));
+        command.args(args);
+        self.finish(command, true)
+    }
+
+    /// Run pq-sync in a pseudo-terminal, as the owner at the keyboard, with
+    /// none of pq-sync's tokens: only the state key.
+    fn run_at_terminal(&self, args: &[&str]) -> Output {
+        let program = env!("CARGO_BIN_EXE_pq-sync");
+        let mut command = Command::new("script");
+        if cfg!(target_os = "macos") {
+            command.args(["-q", "/dev/null", program]).args(args);
+        } else {
+            let line = std::iter::once(program)
+                .chain(args.iter().copied())
+                .map(|word| format!("'{word}'"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            command.args(["-qec", &line, "/dev/null"]);
+        }
+        self.finish(command, false)
+    }
+
+    fn finish(&self, mut command: Command, tokens: bool) -> Output {
+        command
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", self.path("home"))
@@ -120,11 +150,13 @@ impl World {
             .env("XDG_STATE_HOME", self.path("state"))
             .env("FAKE_DIR", self.path("fake"))
             .env("PQ_SYNC_SECRETS_FROM_ENV", "1")
-            .env("PQ_SYNC_PROTON_TOKEN", PROTON_TOKEN)
-            .env("PQ_SYNC_OP_TOKEN", OP_TOKEN)
-            .env("PQ_SYNC_STATE_KEY", STATE_KEY)
-            .output()
-            .unwrap();
+            .env("PQ_SYNC_STATE_KEY", STATE_KEY);
+        if tokens {
+            command
+                .env("PQ_SYNC_PROTON_TOKEN", PROTON_TOKEN)
+                .env("PQ_SYNC_OP_TOKEN", OP_TOKEN);
+        }
+        let output = command.stdin(std::process::Stdio::null()).output().unwrap();
         self.assert_no_leaks(&output);
         output
     }
@@ -309,4 +341,41 @@ fn a_config_with_a_relative_program_is_refused() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("absolute path"));
     assert!(world.args().is_empty());
+}
+
+#[test]
+fn as_me_needs_no_tokens_and_creates_the_missing_vault() {
+    let world = World::new("");
+    fs::write(world.path("fake/vaults.json"), "[]").unwrap();
+
+    let setup = world.run_at_terminal(&["setup", "--as-me"]);
+    let shown = stdout(&setup);
+    assert!(setup.status.success(), "{shown}");
+    assert!(shown.contains("created on the first run"), "{shown}");
+
+    let output = world.run_at_terminal(&["run", "--as-me"]);
+    let shown = stdout(&output);
+    assert!(output.status.success(), "{shown}");
+    assert!(
+        world
+            .args()
+            .contains("op vault create Proton · Personal --format json"),
+        "{}",
+        world.args()
+    );
+    assert_eq!(fs::read_dir(world.path("fake/items")).unwrap().count(), 1);
+    // The owner's own sign-ins: no service account token, no session of
+    // pq-sync's own.
+    let op_tokens = read(&world.path("fake/op-token-env")).unwrap();
+    assert!(op_tokens.lines().all(str::is_empty), "{op_tokens}");
+    let sessions = read(&world.path("fake/pass-cli-session-env")).unwrap();
+    assert!(sessions.lines().all(|l| l == "unset"), "{sessions}");
+}
+
+#[test]
+fn as_me_is_refused_away_from_a_terminal() {
+    let world = World::new("");
+    let output = world.run(&["run", "--as-me"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("at the keyboard"));
 }

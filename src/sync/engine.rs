@@ -430,6 +430,14 @@ impl Engine<'_> {
                     }
                 }
             }
+            None if self.config.create_op_vaults => {
+                self.report.push(Event::Vault(format!(
+                    "would create '{}' in 1Password for Proton's '{}'",
+                    crate::text::printable(&name),
+                    crate::text::printable(&proton.name)
+                )));
+                return Ok(None);
+            }
             None => {
                 self.report.push(Event::Vault(format!(
                     "no 1Password vault for Proton's '{}': create one named '{}' and give the \

@@ -124,8 +124,19 @@ Each Proton vault `X` pairs with a 1Password vault named `Proton · X`, which yo
    pass-cli personal-access-token access grant --help
    ```
 3. Run `pq-sync setup`. It asks for both tokens (input hidden) and stores them in the macOS Keychain with a key for the state file. It also records where `pass-cli` and `op` are, and checks both sides. If Proton is blocked where you are, add `--proton-proxy http://host:port`; only pass-cli's traffic goes through it.
-4. Run `pq-sync run --dry-run` to see what would change, then `pq-sync run`. For a first large copy, `pq-sync run --as-me` uses your own 1Password sign-in instead of the service account, which on individual plans allows 100 writes an hour and 1,000 requests a day.
+4. Run `pq-sync run --dry-run` to see what would change, then `pq-sync run`. For a first large copy, `pq-sync run --as-me` uses your own sign-ins instead of the tokens (see below), which avoids the service account's request limits.
 5. Run `pq-sync install-agent` to sync every 30 minutes in the background. `pq-sync status` shows the last run's report, plus everything earlier runs found that needs you; clear that list with `pq-sync status --clear` once you have dealt with it. You get a notification when something needs you.
+
+### Without tokens
+
+If you only want to sync by hand, pq-sync can use the sign-ins you already have: the 1Password app (with its CLI integration turned on) and your own `pass-cli login`. Nothing is stored in the Keychain but the state file's key, which pq-sync makes itself.
+
+1. Run `pq-sync setup --as-me`. It records where `pass-cli` and `op` are and checks both sides, and asks for no tokens.
+2. Run `pq-sync run --as-me --dry-run`, then `pq-sync run --as-me`. Missing `Proton · <name>` vaults are created in 1Password on the first run. They are your own vaults: if you add tokens later, give the service account read and write access to them.
+
+`--as-me` only runs at the keyboard: the 1Password app may ask you to approve it, and a background sync would fail whenever the app is locked or your pass-cli session has ended. So `install-agent` needs the tokens. Your own pass-cli login also sees every Proton vault, not just the ones a token was given, so every one is synced unless the config's `include_vaults` or `exclude_vaults` says otherwise.
+
+With tokens, `pq-sync setup --create-vaults` lets the background sync create missing vaults too; create the service account with `--can-create-vaults`.
 
 ### On Linux
 
