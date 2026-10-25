@@ -92,7 +92,7 @@ impl Command {
         for (key, value) in &self.env {
             command.env(key, OsString::from(value.expose()));
         }
-        let mut child = command.spawn().map_err(|e| {
+        let mut child = spawn(&mut command).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 anyhow::anyhow!("{name} not found")
             } else {
@@ -151,6 +151,22 @@ impl Command {
             stdout: SecretString::new(stdout),
             stderr,
         })
+    }
+}
+
+/// Spawn, trying again for a moment while the program is busy being written
+/// (ETXTBSY on Linux): just after it was installed or upgraded, or while
+/// another thread's freshly forked child still holds it open for writing.
+fn spawn(command: &mut StdCommand) -> std::io::Result<std::process::Child> {
+    let mut tries = 0;
+    loop {
+        match command.spawn() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 20 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            result => return result,
+        }
     }
 }
 
@@ -236,8 +252,10 @@ mod tests {
     fn a_leftover_process_holding_stdin_does_not_hold_the_run() {
         let dir = tempfile::tempdir().unwrap();
         // The tool exits at once, leaving a child that keeps stdin open
-        // without reading it, so a large input never finishes writing.
-        let tool = script(&dir, "sleep 8 <&0 >/dev/null 2>&1 &");
+        // without reading it, so a large input never finishes writing. The
+        // pipe goes through fd 3: a shell without job control (dash) points
+        // a background job's stdin at /dev/null before its redirections.
+        let tool = script(&dir, "exec 3<&0; sleep 8 <&3 >/dev/null 2>&1 &");
         let started = Instant::now();
         let result = Command::new(&tool, Duration::from_secs(2))
             .stdin(SecretString::new("x".repeat(1 << 20)))
