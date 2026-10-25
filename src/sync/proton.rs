@@ -85,12 +85,16 @@ impl Proton {
                  is stored. Run: pq-sync setup"
             );
         };
-        self.run(
-            "pass-cli login",
-            self.command()
-                .arg("login")
-                .env("PROTON_PASS_PERSONAL_ACCESS_TOKEN", token.clone()),
-        )?;
+        let login = self
+            .command()
+            .arg("login")
+            .env("PROTON_PASS_PERSONAL_ACCESS_TOKEN", token.clone())
+            .run()?;
+        if !login.status.success() {
+            // pass-cli may repeat a token it refused; the error must not.
+            let stderr = String::from_utf8_lossy(&login.stderr).replace(token.expose(), "[token]");
+            return Err(failure("pass-cli login", stderr.as_bytes()));
+        }
         self.run(
             "pass-cli info",
             self.command().args(["info", "--output", "json"]),
@@ -357,6 +361,20 @@ mod tests {
             &calls[2].env,
             "PROTON_PASS_PERSONAL_ACCESS_TOKEN=<unset>"
         ));
+    }
+
+    #[test]
+    fn a_refused_login_never_repeats_the_token() {
+        let fake = FakeCli::new();
+        fake.fail_once(
+            "info---output",
+            "Error: This operation requires an authenticated client",
+        );
+        fake.fail("login-", "Error: invalid token pst_token::key");
+        let err = proton(&fake, Some("pst_token::key"))
+            .ensure_session()
+            .unwrap_err();
+        assert!(!format!("{err:#}").contains("pst_token"), "{err:#}");
     }
 
     #[test]
