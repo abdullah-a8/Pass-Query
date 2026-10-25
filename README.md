@@ -22,7 +22,7 @@
 
 ### Prebuilt binary
 
-Download the archive for your platform from the [latest release](https://github.com/abdullah-a8/Pass-Query/releases/latest):
+Download the archive for your platform from the [latest release](https://github.com/abdullah-a8/Pass-Query/releases/latest). Each holds `pq` and `pq-sync`:
 
 | Platform | Archive |
 |---|---|
@@ -34,17 +34,17 @@ Download the archive for your platform from the [latest release](https://github.
 The Linux binaries are static and run on any distribution. Verify the download, then install it:
 
 ```
-shasum -a 256 -c pq-v0.5.0-x86_64-unknown-linux-musl.tar.gz.sha256 &&
-gh attestation verify pq-v0.5.0-x86_64-unknown-linux-musl.tar.gz \
+shasum -a 256 -c pq-v0.5.1-x86_64-unknown-linux-musl.tar.gz.sha256 &&
+gh attestation verify pq-v0.5.1-x86_64-unknown-linux-musl.tar.gz \
     --repo abdullah-a8/Pass-Query \
     --signer-workflow abdullah-a8/Pass-Query/.github/workflows/release.yml \
-    --source-ref refs/tags/v0.5.0 &&
-tar -xzf pq-v0.5.0-x86_64-unknown-linux-musl.tar.gz &&
+    --source-ref refs/tags/v0.5.1 &&
+tar -xzf pq-v0.5.1-x86_64-unknown-linux-musl.tar.gz &&
 mkdir -p ~/.local/bin &&
-install pq-v0.5.0-x86_64-unknown-linux-musl/pq ~/.local/bin/
+install pq-v0.5.1-x86_64-unknown-linux-musl/pq pq-v0.5.1-x86_64-unknown-linux-musl/pq-sync ~/.local/bin/
 ```
 
-`gh attestation verify` checks that the archive was built by this repository's release workflow from the `v0.5.0` tag. Each step runs only if the one before it succeeded.
+`gh attestation verify` checks that the archive was built by this repository's release workflow from the `v0.5.1` tag. Each step runs only if the one before it succeeded.
 
 ### From source
 
@@ -115,7 +115,7 @@ What it does on each run:
 
 Each Proton vault `X` pairs with a 1Password vault named `Proton · X`, which you create. pq-sync uses a 1Password service account, and service accounts cannot reach your built-in Personal or Private vault. Save new logins into a `Proton · …` vault so they reach Proton.
 
-### Setting it up
+### Setting it up (macOS)
 
 1. In 1Password, create a vault `Proton · <name>` for each Proton vault you want synced, then a [service account](https://developer.1password.com/docs/service-accounts/get-started/) with read and write access to those vaults.
 2. Create a Proton personal access token for pq-sync and give it the editor role on the vaults to sync:
@@ -127,9 +127,22 @@ Each Proton vault `X` pairs with a 1Password vault named `Proton · X`, which yo
 4. Run `pq-sync run --dry-run` to see what would change, then `pq-sync run`. For a first large copy, `pq-sync run --as-me` uses your own 1Password sign-in instead of the service account, which on individual plans allows 100 writes an hour and 1,000 requests a day.
 5. Run `pq-sync install-agent` to sync every 30 minutes in the background. `pq-sync status` shows the last run's report, plus everything earlier runs found that needs you; clear that list with `pq-sync status --clear` once you have dealt with it. You get a notification when something needs you.
 
+### On Linux
+
+There is no Keychain or LaunchAgent on Linux, so pq-sync takes its secrets from the environment, and you schedule it yourself:
+
+1. Do steps 1 and 2 above. Then put the three secrets in a file only you can read, for example `~/.config/pq-sync/env` with mode 0600. Make the state key once, with `openssl rand -hex 32`, and keep it: the state's hashes only match under the key that made them.
+   ```
+   PQ_SYNC_PROTON_TOKEN=pst_...
+   PQ_SYNC_OP_TOKEN=ops_...
+   PQ_SYNC_STATE_KEY=<64 hex digits>
+   ```
+2. With those variables exported, run `pq-sync setup`, `pq-sync run --dry-run` and `pq-sync run`, as on macOS. Setup finds the tokens already set and asks for nothing.
+3. To sync in the background, run `pq-sync run --quiet` every 30 minutes from a systemd user timer (`EnvironmentFile=` pointing at that file) or from cron. `install-agent` is macOS only.
+
 ### What pq-sync keeps
 
-- **Tokens and the state key:** in the login Keychain. Only the `pq-sync` binary that stored them can read them without asking; after an upgrade, run `pq-sync run` once in a terminal so macOS can ask.
+- **Tokens and the state key:** in the login Keychain. Only the `pq-sync` binary that stored them can read them without asking; after an upgrade, run `pq-sync run` once in a terminal so macOS can ask. On Linux, wherever you keep the environment file.
 - **State:** `~/.local/state/pq-sync/state.json` (or `$XDG_STATE_HOME/pq-sync/`), private like pq's cache. It holds which item mirrors which, by ID, and a keyed hash of each field, never a value. The last report, with item titles, sits beside it.
 - **Proton session:** pq-sync keeps its own pass-cli session in that directory, apart from yours.
 - **Secrets in transit:** item contents reach the CLIs only through their standard input, and tokens only through the environment, never as command-line arguments.
