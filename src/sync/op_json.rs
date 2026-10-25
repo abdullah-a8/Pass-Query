@@ -357,6 +357,10 @@ fn bind(raw: &Value, kind: Kind, slots: &[Slot]) -> Result<(Record, Binding, Opt
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     let mut custom_names: BTreeSet<String> = BTreeSet::new();
     for (index, field) in fields.iter().enumerate() {
+        if !field.is_object() {
+            binding.ambiguous = true;
+            continue;
+        }
         let id = str_of(field, "id");
         let section = section_id(field);
         let slot = slots
@@ -425,8 +429,20 @@ fn bind(raw: &Value, kind: Kind, slots: &[Slot]) -> Result<(Record, Binding, Opt
             }
         }
     }
-    // URLs too must be ones the read can represent, or an edit of them
-    // would drop or mix up what the read never showed.
+    // An edit touches the title, the URLs, the fields and the sections:
+    // each must be something the read can represent, or an edit would
+    // overwrite or drop what the read never showed.
+    if raw
+        .get("title")
+        .is_some_and(|title| !title.is_null() && !title.is_string())
+    {
+        binding.ambiguous = true;
+    }
+    match raw.get("sections") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(sections)) if sections.iter().all(Value::is_object) => {}
+        Some(_) => binding.ambiguous = true,
+    }
     match raw.get("urls") {
         None | Some(Value::Null) => {}
         Some(Value::Array(urls)) => {
@@ -435,6 +451,7 @@ fn bind(raw: &Value, kind: Kind, slots: &[Slot]) -> Result<(Record, Binding, Opt
                 match url.get("href").and_then(Value::as_str) {
                     Some(href)
                         if url.is_object()
+                            && !href.trim().is_empty()
                             && !href.contains(['\n', '\r'])
                             && hrefs.insert(href.trim()) => {}
                     _ => binding.ambiguous = true,
@@ -564,7 +581,7 @@ enum Change {
 /// `raw` is kept. An ambiguous item is refused.
 pub fn apply_edit(raw: &mut RawItem, record: &Record, keys: &BTreeSet<String>) -> Result<()> {
     if !raw.0.is_object() {
-        raw.0 = json!({});
+        bail!("the 1Password item is not a JSON object");
     }
     // The fields a key binds to depend on the category: a record of
     // another kind would write where a read of this item never looked.
@@ -1477,5 +1494,35 @@ mod tests {
         let item = parse_item(&returned).unwrap().unwrap();
         assert!(!item.ambiguous);
         assert_eq!(item.record, record);
+    }
+
+    #[test]
+    fn everything_an_edit_touches_must_be_readable() {
+        let login = |extra: Value| {
+            let mut raw =
+                json!({ "id": "i", "title": "T", "category": "LOGIN", "version": 1, "fields": [] });
+            for (key, value) in extra.as_object().unwrap() {
+                raw[key] = value.clone();
+            }
+            parse_item(&raw.to_string()).unwrap().unwrap()
+        };
+        for extra in [
+            json!({ "urls": [{ "href": " \t ", "label": "Recovery", "secret": "RAW" },
+                             { "href": "https://a.test", "primary": true }] }),
+            json!({ "urls": [{ "href": "" }] }),
+            json!({ "title": { "secret": "RAW" } }),
+            json!({ "sections": { "id": "other", "label": "Recovery" } }),
+            json!({ "sections": ["not a section"] }),
+            json!({ "fields": ["not a field"] }),
+        ] {
+            assert!(login(extra.clone()).ambiguous, "{extra}");
+        }
+        for fine in [
+            json!({ "title": null }),
+            json!({ "sections": null }),
+            json!({ "sections": [{ "id": "s", "label": "S" }] }),
+        ] {
+            assert!(!login(fine.clone()).ambiguous, "{fine}");
+        }
     }
 }
