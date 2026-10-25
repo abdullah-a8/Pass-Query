@@ -2,9 +2,9 @@
 
 mod support;
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use support::{Harness, Login, stderr, stdout};
+use support::{Harness, Login, PATIENCE, STALL, stderr, stdout};
 
 const GITHUB: Login = Login {
     id: "item-github",
@@ -91,20 +91,20 @@ Error: Error listing vaults\n\nCaused by:\n    Could not perform operation. Reas
 #[test]
 fn a_stalled_version_check_does_not_hold_up_the_search() {
     let h = harness();
-    h.slow_version(30);
+    h.slow_version(STALL);
 
     let started = Instant::now();
     let out = h.run(&["github", "-p"]);
 
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     assert_eq!(stdout(&out), "Username: octocat\nPassword: github-secret\n");
-    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(started.elapsed() < PATIENCE, "took {:?}", started.elapsed());
 }
 
 #[test]
 fn a_stalled_version_check_does_not_hold_up_a_vault_error() {
     let h = harness();
-    h.slow_version(30);
+    h.slow_version(STALL);
     h.fail("vault-list", LOCKED);
 
     let started = Instant::now();
@@ -112,5 +112,5 @@ fn a_stalled_version_check_does_not_hold_up_a_vault_error() {
 
     assert!(!out.status.success());
     assert!(stderr(&out).contains("locked"), "{}", stderr(&out));
-    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(started.elapsed() < PATIENCE, "took {:?}", started.elapsed());
 }

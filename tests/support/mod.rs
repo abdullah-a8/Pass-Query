@@ -674,6 +674,16 @@ impl Running<'_> {
     }
 }
 
+/// How long a fake stalls, hangs or lingers when a test asks it to, in
+/// seconds: far longer than [`PATIENCE`], so a test that finishes within
+/// that did not wait for the fake.
+pub const STALL: u32 = 30;
+
+/// How long a test waits for something that should happen promptly, or
+/// allows for pq to finish without waiting for a stalled fake. Generous, so
+/// a loaded machine (a full test run, CI) does not fail it.
+pub const PATIENCE: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Poll `condition` every 50 ms until it holds or `timeout` passes.
 pub fn eventually(timeout: std::time::Duration, mut condition: impl FnMut() -> bool) -> bool {
     let deadline = std::time::Instant::now() + timeout;

@@ -36,11 +36,11 @@ copy() {
     # clipboard-linger: stay behind serving the selection, as wl-copy and
     # xclip do, holding on to the stderr pq gave this tool.
     if [ -f "$dir/clipboard-linger" ]; then
-        sleep 5 &
+        sleep 30 &
     fi
     # clipboard-hang: publish the text, then never exit.
     if [ -f "$dir/clipboard-hang" ] && [ -s "$now" ]; then
-        sleep 10
+        sleep 30
     fi
 }
 

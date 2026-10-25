@@ -50,6 +50,16 @@ if [ -f "$dir/fail/$command" ]; then
     exit "$(cat "$dir/fail/$command.code" 2>/dev/null || echo 1)"
 fi
 
+# Wait $1 seconds in short steps: when pq kills this fake (as it does a
+# stalled call), no long sleep is left behind holding pipes open.
+pause() {
+    steps=$(( $1 * 10 ))
+    while [ "$steps" -gt 0 ]; do
+        sleep 0.1
+        steps=$(( steps - 1 ))
+    done
+}
+
 unsupported() {
     echo "fake pass-cli: unsupported invocation: $*" >&2
     exit 2
@@ -59,7 +69,7 @@ case "$command" in
 --version-)
     # pass-cli prints "<name> <version> (<git hash>)". delay/version slows it.
     if [ -f "$dir/delay/version" ]; then
-        sleep "$(cat "$dir/delay/version")"
+        pause "$(cat "$dir/delay/version")"
     fi
     printf 'Proton Pass CLI %s (0a1b2c3)\n' "$(cat "$dir/version" 2>/dev/null || echo 2.5.1)"
     ;;
@@ -85,7 +95,7 @@ item-list)
     [ -z "$filter" ] || [ "$filter" = login ] || unsupported "item list --filter-type $filter"
     # delay/item-list.<share-id> holds seconds to wait first (a slow vault).
     if [ -f "$dir/delay/item-list.$share" ]; then
-        sleep "$(cat "$dir/delay/item-list.$share")"
+        pause "$(cat "$dir/delay/item-list.$share")"
     fi
     if [ -f "$dir/fail/item-list.$share" ]; then
         cat "$dir/fail/item-list.$share" >&2
@@ -114,7 +124,7 @@ item-view)
     [ -n "$item" ] || unsupported "item view without --item-id"
     # delay/item-view.<item-id> slows, fail/item-view.<item-id> fails one item.
     if [ -f "$dir/delay/item-view.$item" ]; then
-        sleep "$(cat "$dir/delay/item-view.$item")"
+        pause "$(cat "$dir/delay/item-view.$item")"
     fi
     if [ -f "$dir/fail/item-view.$item" ]; then
         cat "$dir/fail/item-view.$item" >&2
