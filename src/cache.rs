@@ -124,7 +124,10 @@ fn cache_safe_vault_list(vaults: &VaultList) -> VaultList {
 /// carried into the new file.
 fn load_for_update(cache_path: &Path) -> Result<Cache> {
     let existing = read_private(cache_path).and_then(|data| parse_cache(&data));
-    ensure_private_dir(cache_path.parent().context("Cache path has no directory")?)?;
+    ensure_private_dir(
+        cache_path.parent().context("Cache path has no directory")?,
+        "cache",
+    )?;
     Ok(existing.unwrap_or_default())
 }
 
@@ -181,7 +184,7 @@ pub fn set_cached_vault(vault_key: &str, login_only: bool, items: &ItemList) -> 
 
     // Write cache back to disk
     let cache_json = serde_json::to_string(&cache)?;
-    write_private(&cache_path, &cache_json)?;
+    write_private(&cache_path, &cache_json, "cache")?;
 
     Ok(())
 }
@@ -209,7 +212,7 @@ pub fn set_cached_vault_list(vaults: &VaultList) -> Result<()> {
     });
 
     let cache_json = serde_json::to_string(&cache)?;
-    write_private(&cache_path, &cache_json)?;
+    write_private(&cache_path, &cache_json, "cache")?;
 
     Ok(())
 }
