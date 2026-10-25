@@ -722,14 +722,28 @@ impl Engine<'_> {
                                     title: title.clone(),
                                 });
                             }
+                            // The moved item's version, so a change after the
+                            // move (a passkey) is caught; unknown, the item is
+                            // never edited again.
+                            let read = if self.op_allows(op_requests::ITEM_GET, false) {
+                                self.op.get(&target.op.id, &new_id).ok().flatten()
+                            } else {
+                                None
+                            };
+                            let (version, unsafe_now) = match &read {
+                                Some(item) => {
+                                    (version_of(&item.raw), item.has_files || item.ambiguous)
+                                }
+                                None => (0, true),
+                            };
                             let pair = &mut self.state.items[index];
-                            pair.op_guarded |= foreign_change;
+                            pair.op_guarded |= foreign_change || unsafe_now;
                             pair.proton_share = target.proton.id.clone();
                             pair.proton_item = id.clone();
                             pair.op_vault = target.op.id.clone();
                             pair.op_item = new_id;
-                            // Read both sides again next run.
-                            pair.op_version = 0;
+                            pair.op_version = version;
+                            // Proton is read again next run.
                             pair.proton_modified = String::new();
                             self.report.push(Event::Moved {
                                 title,

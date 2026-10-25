@@ -1236,3 +1236,28 @@ fn a_guarded_login_the_owner_lays_out_by_hand_settles() {
     let report = w.sync();
     assert!(report.events.is_empty(), "{report}");
 }
+
+#[test]
+fn a_passkey_saved_after_a_move_is_still_caught() {
+    let mut w = World::new();
+    w.proton.vault("ps2", "Work");
+    w.op.vault("ov2", "Proton · Work");
+    let id = w.proton.add("ps1", login("Site", "alice", "pw1"));
+    w.sync();
+    let moved = w.proton.move_by_owner("ps1", &id, "ps2");
+    w.sync();
+    // A passkey saved in 1Password before the next run.
+    let op_id = w.op_item_of(&moved);
+    w.op.add_passkey("ov2", &op_id);
+    let report = w.sync();
+    assert!(
+        has(&report, |e| matches!(e, Event::Guarded { .. })),
+        "{report}"
+    );
+    w.proton.edit("ps2", &moved, |r| {
+        r.set("password", "pw2", FieldKind::Concealed)
+    });
+    let writes = w.op.writes.len();
+    w.sync();
+    assert_eq!(w.op.writes.len(), writes, "never edited");
+}
