@@ -129,7 +129,7 @@ Each Proton vault `X` pairs with a 1Password vault named `Proton · X`, which yo
 
 ### Without tokens
 
-If you only want to sync by hand, pq-sync can use the sign-ins you already have: the 1Password app (with its CLI integration turned on) and your own `pass-cli login`. Nothing is stored in the Keychain but the state file's key, which pq-sync makes itself.
+If you only want to sync by hand, pq-sync can use the sign-ins you already have: the 1Password app (with its CLI integration turned on) and your own `pass-cli login`. `--as-me` stores no tokens: only the state file's key, which pq-sync makes itself, goes in the Keychain. Tokens an earlier `pq-sync setup` stored stay there, for the agent.
 
 1. Run `pq-sync setup --as-me`. It records where `pass-cli` and `op` are and checks both sides, and asks for no tokens.
 2. Run `pq-sync run --as-me --dry-run`, then `pq-sync run --as-me`. Missing `Proton · <name>` vaults are created in 1Password on the first run. They are your own vaults: if you add tokens later, give the service account read and write access to them. A service account's vaults are fixed when it is made, so that means a new one. Until then, a vault the sign-in cannot reach is skipped, and nothing that vanished elsewhere is deleted, since it may have moved there. `pq-sync setup` names such vaults.

@@ -868,3 +868,13 @@ fn a_paired_proton_vault_out_of_reach_holds_back_deletions() {
     );
     assert_eq!(w.op.in_vault("ov1").len(), 1);
 }
+
+#[test]
+fn the_vault_lists_say_which_vaults_sync() {
+    let mut config = Config::default();
+    assert!(config.syncs("Personal"));
+    config.include_vaults = vec!["Work".into()];
+    assert!(!config.syncs("Personal") && config.syncs("Work"));
+    config.exclude_vaults = vec!["Work".into()];
+    assert!(!config.syncs("Work"));
+}

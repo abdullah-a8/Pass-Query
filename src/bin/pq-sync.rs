@@ -509,7 +509,13 @@ fn setup(
     check_proxy(&config.proton_proxy)?;
     let mut proton = proton(&config, &dir, as_me)?;
     proton.ensure_session()?;
-    let proton_vaults = proton.vaults()?;
+    // Only the vaults a run syncs.
+    let filter = config.engine();
+    let proton_vaults: Vec<_> = proton
+        .vaults()?
+        .into_iter()
+        .filter(|vault| filter.syncs(&vault.name))
+        .collect();
     let token = if as_me {
         None
     } else {

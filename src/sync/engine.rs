@@ -69,6 +69,15 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// Whether the Proton vault `name` is synced: included (or no list),
+    /// and not excluded.
+    pub fn syncs(&self, name: &str) -> bool {
+        (self.include_vaults.is_empty() || self.include_vaults.iter().any(|v| v == name))
+            && !self.exclude_vaults.iter().any(|v| v == name)
+    }
+}
+
 /// The Proton item a 1Password copy points back to: `share_id/item_id`.
 pub fn proton_ref(share: &str, item: &str) -> String {
     format!("{share}/{item}")
@@ -336,11 +345,7 @@ impl Engine<'_> {
         }
         let proton_vaults: Vec<Vault> = all_proton
             .into_iter()
-            .filter(|vault| {
-                (self.config.include_vaults.is_empty()
-                    || self.config.include_vaults.contains(&vault.name))
-                    && !self.config.exclude_vaults.contains(&vault.name)
-            })
+            .filter(|vault| self.config.syncs(&vault.name))
             .collect();
         if !self.op_allows(op_requests::VAULT_LIST, false) {
             return Ok(Vec::new());
