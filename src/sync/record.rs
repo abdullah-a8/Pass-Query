@@ -108,12 +108,18 @@ impl Record {
         self.set("urls", joined, FieldKind::Urls);
     }
 
-    /// Add a custom field named `name`. A name already taken gets " #2",
-    /// " #3", ... so no value is lost.
-    pub fn add_custom(&mut self, name: &str, value: impl Into<String>, kind: FieldKind) {
+    /// Add a custom field named `name` and return the key it got. A name
+    /// already taken gets " #2", " #3", ... so no value is lost. An empty
+    /// value adds nothing.
+    pub fn add_custom(
+        &mut self,
+        name: &str,
+        value: impl Into<String>,
+        kind: FieldKind,
+    ) -> Option<String> {
         let value = value.into();
         if value.is_empty() {
-            return;
+            return None;
         }
         let name = name.trim();
         let base = format!("{CUSTOM_PREFIX}{name}");
@@ -123,7 +129,8 @@ impl Record {
             key = format!("{base} #{n}");
             n += 1;
         }
-        self.fields.insert(key, Field { value, kind });
+        self.fields.insert(key.clone(), Field { value, kind });
+        Some(key)
     }
 
     pub fn get(&self, key: &str) -> Option<&Field> {
@@ -179,12 +186,15 @@ impl Record {
 pub type FieldHash = String;
 
 /// The hash of `field` stored under `name`. The kind is part of the input,
-/// so a text field turned concealed counts as a change.
+/// so a text field turned concealed counts as a change; the name and value
+/// are length-prefixed, so no two (name, value) pairs share an input.
 pub fn field_hash(key: &[u8], name: &str, field: &Field) -> FieldHash {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC takes any key length");
-    mac.update(b"pq-sync field v1\0");
+    mac.update(b"pq-sync field v2\0");
+    mac.update(&(name.len() as u64).to_be_bytes());
     mac.update(name.as_bytes());
-    mac.update(&[0, kind_byte(field.kind)]);
+    mac.update(&[kind_byte(field.kind)]);
+    mac.update(&(field.value.len() as u64).to_be_bytes());
     mac.update(field.value.as_bytes());
     hex(&mac.finalize().into_bytes())
 }
@@ -213,32 +223,45 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// A credit card expiry as `YYYY-MM`, from the forms the two services use
-/// (`2027-12`, `2027/12`, `202712`, `12/2027`, `122027`). `None` when it is
-/// not a month of a year.
+/// A credit card expiry as `YYYY-MM`, from the forms the two services use:
+/// `2027-12`, `2027/12`, `202712`, `12/2027`, `122027`. `None` for anything
+/// else, including dates and two-digit years: only an exact month of a
+/// four-digit year is read as one.
 pub fn normalize_expiry(value: &str) -> Option<String> {
     let value = value.trim();
-    let digits: String = value.chars().filter(char::is_ascii_digit).collect();
-    if digits.len() != 6
-        || !value
-            .chars()
-            .all(|c| c.is_ascii_digit() || "-/ .".contains(c))
-    {
+    if !value.is_ascii() {
         return None;
     }
-    let year_month = |year: &str, month: &str| {
-        let month_number: u32 = month.parse().ok()?;
-        ((year.starts_with("19") || year.starts_with("20")) && (1..=12).contains(&month_number))
-            .then(|| format!("{year}-{month}"))
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    let year_month = |year: &str, month: &str| -> Option<String> {
+        let valid_year = year.len() == 4 && digits(year) && !year.starts_with('0');
+        let valid_month =
+            month.len() == 2 && digits(month) && (1..=12).contains(&month.parse::<u32>().ok()?);
+        (valid_year && valid_month).then(|| format!("{year}-{month}"))
     };
-    // A separator says which part is the year; six bare digits are read
-    // year-first, then month-first.
-    match value.find(|c: char| !c.is_ascii_digit()) {
-        Some(4) => year_month(&digits[..4], &digits[4..]),
-        Some(2) => year_month(&digits[2..], &digits[..2]),
-        Some(_) => None,
-        None => year_month(&digits[..4], &digits[4..])
-            .or_else(|| year_month(&digits[2..], &digits[..2])),
+    let bytes = value.as_bytes();
+    let separator = |at: usize| matches!(bytes.get(at), Some(b'-' | b'/'));
+    match value.len() {
+        7 if separator(4) => year_month(&value[..4], &value[5..]),
+        7 if separator(2) => year_month(&value[3..], &value[..2]),
+        6 if digits(value) => {
+            year_month(&value[..4], &value[4..]).or_else(|| year_month(&value[2..], &value[..2]))
+        }
+        _ => None,
+    }
+}
+
+/// A card number as its digits, when it is digits with spaces or dashes
+/// (pass-cli keeps only the digits); anything else as it is.
+pub fn normalize_card_number(value: &str) -> String {
+    let formatted = value.chars().any(|c| c.is_ascii_digit())
+        && value
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == ' ' || c == '-');
+    if formatted {
+        value.chars().filter(char::is_ascii_digit).collect()
+    } else {
+        value.to_string()
     }
 }
 
@@ -324,8 +347,69 @@ mod tests {
         ] {
             assert_eq!(normalize_expiry(form).as_deref(), Some("2027-12"), "{form}");
         }
-        for bad in ["", "2027", "2027-13", "13/2027", "2027-00", "abc", "2027-1"] {
+        // Any four-digit year: whether a service takes it is its business.
+        assert_eq!(normalize_expiry("2100-01").as_deref(), Some("2100-01"));
+        assert_eq!(normalize_expiry("1999-12").as_deref(), Some("1999-12"));
+        for bad in [
+            "",
+            "2027",
+            "2027-13",
+            "13/2027",
+            "2027-00",
+            "abc",
+            "2027-1",
+            "2027-1-2",
+            "2027/1/2",
+            "20-27-12",
+            "2027--12",
+            "2027-12-01",
+            "12/27",
+        ] {
             assert_eq!(normalize_expiry(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn field_hashes_do_not_collide_across_name_and_value() {
+        let field = |value: &str| Field {
+            value: value.to_string(),
+            kind: FieldKind::Concealed,
+        };
+        assert_ne!(
+            field_hash(KEY, "x:a", &field("b\0\u{2}c")),
+            field_hash(KEY, "x:a\0\u{2}b", &field("c"))
+        );
+    }
+
+    #[test]
+    fn card_numbers_are_kept_as_digits() {
+        assert_eq!(
+            normalize_card_number("4111 1111-1111 1111"),
+            "4111111111111111"
+        );
+        assert_eq!(
+            normalize_card_number("4111111111111111"),
+            "4111111111111111"
+        );
+        // Anything else is not a formatted number: kept as it is.
+        assert_eq!(normalize_card_number("ask the bank"), "ask the bank");
+    }
+
+    #[test]
+    fn add_custom_returns_the_key_it_used() {
+        let mut record = Record::new(Kind::Note);
+        assert_eq!(
+            record.add_custom(" dup ", "a", FieldKind::Text).as_deref(),
+            Some("x:dup")
+        );
+        assert_eq!(
+            record.add_custom("dup", "b", FieldKind::Text).as_deref(),
+            Some("x:dup #2")
+        );
+        assert_eq!(record.add_custom("dup", "", FieldKind::Text), None);
+        assert_eq!(
+            record.add_custom("", "c", FieldKind::Text).as_deref(),
+            Some("x:")
+        );
     }
 }

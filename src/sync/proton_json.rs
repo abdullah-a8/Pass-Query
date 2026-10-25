@@ -11,7 +11,7 @@
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
-use super::record::{FieldKind, Kind, Record, normalize_expiry};
+use super::record::{FieldKind, Kind, Record, normalize_card_number, normalize_expiry};
 use super::secret::SecretString;
 
 /// A Proton item read with its secrets.
@@ -90,7 +90,11 @@ pub fn parse_view(json: &str) -> Result<Option<ProtonItem>> {
                 text(body, "cardholder_name"),
                 FieldKind::Text,
             );
-            record.set("number", text(body, "number"), FieldKind::Concealed);
+            record.set(
+                "number",
+                normalize_card_number(text(body, "number")),
+                FieldKind::Concealed,
+            );
             record.set(
                 "verification_number",
                 text(body, "verification_number"),
@@ -230,8 +234,10 @@ pub fn create_template(record: &Record) -> CreateTemplate {
                 put(&mut template, name, record.value(key));
                 carried.push(key);
             }
-            // pass-cli rejects any expiry but YYYY-MM.
-            if let Some(expiry) = normalize_expiry(record.value("expiration_date")) {
+            // pass-cli takes only YYYY-MM, in years 2000 to 9999.
+            if let Some(expiry) = normalize_expiry(record.value("expiration_date"))
+                .filter(|expiry| expiry.as_str() >= "2000")
+            {
                 template.insert("expiration_date".to_string(), Value::String(expiry));
                 carried.push("expiration_date");
             }
@@ -577,5 +583,30 @@ mod tests {
             .record;
         reread.set("note", "a note", FieldKind::Text);
         assert_eq!(reread, item.record);
+    }
+
+    #[test]
+    fn a_formatted_card_number_reads_as_its_digits() {
+        let card = json!({ "CreditCard": {
+            "cardholder_name": "", "card_type": "Unspecified", "number": "4111 1111 1111 1111",
+            "verification_number": "", "expiration_date": "", "pin": ""
+        }});
+        let card = parse_view(&view(card, json!([]))).unwrap().unwrap().record;
+        assert_eq!(card.value("number"), "4111111111111111");
+    }
+
+    #[test]
+    fn an_expiry_pass_cli_would_refuse_is_reported_missing() {
+        let mut card = Record::new(Kind::CreditCard);
+        card.set("title", "C", FieldKind::Text);
+        card.set("expiration_date", "1999-12", FieldKind::Text);
+        let template = create_template(&card);
+        assert!(template_value(&template).get("expiration_date").is_none());
+        assert_eq!(template.missing, ["expiration_date"]);
+
+        card.set("expiration_date", "2100-01", FieldKind::Text);
+        let template = create_template(&card);
+        assert_eq!(template_value(&template)["expiration_date"], "2100-01");
+        assert!(template.missing.is_empty());
     }
 }
