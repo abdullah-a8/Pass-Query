@@ -5,21 +5,28 @@
 //! Each canonical field has a slot: a built-in 1Password field where one
 //! fits (a login's username, a card's number), otherwise a field in pq-sync's
 //! own "Proton Pass" section. Custom fields go to a "Proton Pass custom
-//! fields" section. An edit changes only the slots it writes and keeps every
-//! other part of the item JSON as `op` returned it.
+//! fields" section. Reading and editing share one binding of canonical keys
+//! to the item's fields, so an edit changes exactly the fields a read named,
+//! and keeps every other part of the item JSON as `op` returned it.
+//!
+//! Item JSON is untrusted: anyone who can edit the item can add fields. A
+//! slot binds only to a field with its id in its section, pq-sync's
+//! reference only to its own well-formed field, and an item where a
+//! reserved field appears twice is [`OpItem::ambiguous`] and is not edited.
 //!
 //! What the CLI cannot show, it cannot keep: a JSON template edit overwrites
-//! passkeys, and `op item get` does not list them. Callers decide from
-//! [`OpItem::has_files`] and [`visible_fingerprint`] whether an item is safe
-//! to edit.
+//! passkeys, and `op item get` does not list them. The engine decides from
+//! the item's history whether an item is safe to edit.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use super::proton_json::{IDENTITY_FIELDS, identity_field_kind};
-use super::record::{CUSTOM_PREFIX, FieldKind, Kind, Record, keyed_hash, normalize_expiry};
+use super::record::{
+    CUSTOM_PREFIX, FieldKind, Kind, Record, normalize_card_number, normalize_expiry,
+};
 use super::secret::SecretString;
 
 /// pq-sync's section for fields 1Password has no built-in slot for.
@@ -28,8 +35,8 @@ const SECTION_LABEL: &str = "Proton Pass";
 /// pq-sync's section for Proton's custom fields.
 pub const CUSTOM_SECTION_ID: &str = "pq-sync-custom";
 const CUSTOM_SECTION_LABEL: &str = "Proton Pass custom fields";
-/// The field holding the Proton item's `share_id/item_id`, so a lost state
-/// file can be rebuilt. Not a secret.
+/// The field holding the Proton item's `share_id/item_id`, a hint for
+/// pairing items again. Not a secret, and not to be trusted alone.
 pub const REF_FIELD_ID: &str = "pqsync-ref";
 /// Where a card expiry that is not a month of a year goes: 1Password's
 /// month/year field would refuse it.
@@ -46,14 +53,33 @@ impl fmt::Debug for RawItem {
 }
 
 /// A 1Password item read with its secrets.
-#[derive(Debug)]
 pub struct OpItem {
     pub record: Record,
     pub raw: RawItem,
-    /// The Proton reference pq-sync stored on the item, if any.
+    /// The Proton reference pq-sync stored on the item, if it is there,
+    /// once, in pq-sync's section and well formed.
     pub proton_ref: Option<String>,
     /// Files are attached: a template edit might not keep them.
     pub has_files: bool,
+    /// A field pq-sync relies on appears more than once: which one a read
+    /// or an edit means is unclear, so the item is not edited.
+    pub ambiguous: bool,
+}
+
+// Written by hand: the reference comes from item content.
+impl fmt::Debug for OpItem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpItem")
+            .field("record", &self.record)
+            .field("raw", &self.raw)
+            .field(
+                "proton_ref",
+                &self.proton_ref.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("has_files", &self.has_files)
+            .field("ambiguous", &self.ambiguous)
+            .finish()
+    }
 }
 
 /// The kind of an `op` category, or `None` for categories pq-sync does not
@@ -263,13 +289,11 @@ fn str_of<'a>(value: &'a Value, key: &str) -> &'a str {
     value.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
-/// The custom-field name of a field that is not in a slot: its label, under
-/// its section's label unless it is in pq-sync's custom section.
+/// The custom-field name of a field that is not in a slot: its label,
+/// under its section's label unless it is in pq-sync's custom section. Never
+/// the field's id: ids pq-sync generates must not become names.
 fn custom_name(field: &Value) -> String {
-    let label = match str_of(field, "label") {
-        "" => str_of(field, "id"),
-        label => label,
-    };
+    let label = str_of(field, "label");
     match field.get("section") {
         Some(section) if str_of(section, "id") == CUSTOM_SECTION_ID => label.to_string(),
         Some(section) if !str_of(section, "label").is_empty() => {
@@ -277,6 +301,110 @@ fn custom_name(field: &Value) -> String {
         }
         _ => label.to_string(),
     }
+}
+
+fn section_id(field: &Value) -> Option<&str> {
+    field
+        .get("section")
+        .and_then(|section| section.get("id"))
+        .and_then(Value::as_str)
+}
+
+fn in_own_section(field: &Value) -> bool {
+    section_id(field) == Some(SECTION_ID)
+}
+
+/// What a Proton reference looks like: `share_id/item_id`, both pass-cli IDs.
+fn looks_like_reference(value: &str) -> bool {
+    let id = |part: &str| {
+        !part.is_empty()
+            && part.len() <= 200
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_=+".contains(c))
+    };
+    value
+        .split_once('/')
+        .is_some_and(|(share, item)| id(share) && id(item))
+}
+
+/// Which field of the raw item each canonical key reads from and writes
+/// to, by index in `fields`.
+#[derive(Default)]
+struct Binding {
+    slots: BTreeMap<&'static str, usize>,
+    custom: BTreeMap<String, usize>,
+    reference: Option<usize>,
+    expiry_text: Option<usize>,
+    ambiguous: bool,
+}
+
+fn fields_of(raw: &Value) -> Result<&[Value]> {
+    match raw.get("fields") {
+        None | Some(Value::Null) => Ok(&[]),
+        Some(Value::Array(fields)) => Ok(fields.as_slice()),
+        Some(_) => bail!("op item output has malformed fields"),
+    }
+}
+
+/// Read the raw item into a record, and bind each key to its field.
+fn bind(raw: &Value, kind: Kind, slots: &[Slot]) -> Result<(Record, Binding, Option<String>)> {
+    let fields = fields_of(raw)?;
+    let mut record = Record::new(kind);
+    record.set("title", str_of(raw, "title"), FieldKind::Text);
+    let mut binding = Binding::default();
+    let mut reference = None;
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for (index, field) in fields.iter().enumerate() {
+        let id = str_of(field, "id");
+        let section = section_id(field);
+        let slot = slots
+            .iter()
+            .find(|slot| slot.id == id && slot.section.map(|(id, _)| id) == section);
+        let reserved = slot.is_some()
+            || (in_own_section(field)
+                && (id == REF_FIELD_ID || (id == EXPIRY_TEXT_ID && kind == Kind::CreditCard)));
+        if reserved && !seen.insert(id) {
+            binding.ambiguous = true;
+            continue;
+        }
+        // Values that are not text (an address) stay in the raw item only.
+        let value = field.get("value").and_then(Value::as_str);
+        if id == REF_FIELD_ID && in_own_section(field) {
+            binding.reference = Some(index);
+            reference = value
+                .filter(|value| str_of(field, "type") == "STRING" && looks_like_reference(value))
+                .map(str::to_string);
+        } else if id == EXPIRY_TEXT_ID && in_own_section(field) && kind == Kind::CreditCard {
+            binding.expiry_text = Some(index);
+            if let Some(value) = value.filter(|value| !value.is_empty()) {
+                record.set("expiration_date", value, FieldKind::Text);
+            }
+        } else if let Some(slot) = slot {
+            binding.slots.insert(slot.key, index);
+            let Some(value) = value.filter(|value| !value.is_empty()) else {
+                continue;
+            };
+            let value = match slot.key {
+                "expiration_date" => normalize_expiry(value).unwrap_or_else(|| value.to_string()),
+                "number" => normalize_card_number(value),
+                _ => value.to_string(),
+            };
+            record.set(slot.key, value, slot.kind);
+        } else if let Some(value) = value.filter(|value| !value.is_empty())
+            && let Some(key) = record.add_custom(
+                &custom_name(field),
+                value,
+                kind_of_type(str_of(field, "type")),
+            )
+        {
+            binding.custom.insert(key, index);
+        }
+    }
+    if binding.ambiguous {
+        reference = None;
+    }
+    Ok((record, binding, reference))
 }
 
 /// Parse `op item get --format json`. `Ok(None)` for categories pq-sync does
@@ -291,44 +419,7 @@ pub fn parse_item(json: &str) -> Result<Option<OpItem>> {
     let Some(kind) = kind_of_category(category) else {
         return Ok(None);
     };
-    let fields = match root.get("fields") {
-        None | Some(Value::Null) => &[][..],
-        Some(Value::Array(fields)) => fields.as_slice(),
-        Some(_) => anyhow::bail!("op item output has malformed fields"),
-    };
-
-    let slots = slots(kind);
-    let mut record = Record::new(kind);
-    record.set("title", str_of(&root, "title"), FieldKind::Text);
-    let mut proton_ref = None;
-    for field in fields {
-        // Values that are not text (an address) stay in the raw item only.
-        let Some(value) = field.get("value").and_then(Value::as_str) else {
-            continue;
-        };
-        if value.is_empty() {
-            continue;
-        }
-        let id = str_of(field, "id");
-        if id == REF_FIELD_ID {
-            proton_ref = Some(value.to_string());
-        } else if id == EXPIRY_TEXT_ID && kind == Kind::CreditCard {
-            record.set("expiration_date", value, FieldKind::Text);
-        } else if let Some(slot) = slots.iter().find(|slot| slot.id == id) {
-            let value = if slot.key == "expiration_date" {
-                normalize_expiry(value).unwrap_or_else(|| value.to_string())
-            } else {
-                value.to_string()
-            };
-            record.set(slot.key, value, slot.kind);
-        } else {
-            record.add_custom(
-                &custom_name(field),
-                value,
-                kind_of_type(str_of(field, "type")),
-            );
-        }
-    }
+    let (mut record, binding, proton_ref) = bind(&root, kind, &slots(kind))?;
 
     let mut urls: Vec<(bool, &str)> = root
         .get("urls")
@@ -353,6 +444,7 @@ pub fn parse_item(json: &str) -> Result<Option<OpItem>> {
         raw: RawItem(root),
         proton_ref,
         has_files,
+        ambiguous: binding.ambiguous,
     }))
 }
 
@@ -367,18 +459,15 @@ pub fn create_json(record: &Record, proton_ref: &str) -> SecretString {
     }));
     let mut keys: BTreeSet<String> = record.keys().map(str::to_string).collect();
     keys.insert("title".to_string());
-    apply_edit(&mut raw, record, &keys);
+    apply_edit(&mut raw, record, &keys).expect("a new item has no field twice");
     ensure_section(&mut raw.0, SECTION_ID, SECTION_LABEL);
-    push_field(
-        &mut raw.0,
-        json!({
-            "id": REF_FIELD_ID,
-            "type": "STRING",
-            "label": "Proton reference",
-            "value": proton_ref,
-            "section": { "id": SECTION_ID, "label": SECTION_LABEL },
-        }),
-    );
+    fields_mut(&mut raw.0).push(json!({
+        "id": REF_FIELD_ID,
+        "type": "STRING",
+        "label": "Proton reference",
+        "value": proton_ref,
+        "section": { "id": SECTION_ID, "label": SECTION_LABEL },
+    }));
     SecretString::new(raw.0.to_string())
 }
 
@@ -409,28 +498,51 @@ fn fields_mut(raw: &mut Value) -> &mut Vec<Value> {
     fields.as_array_mut().expect("just made an array")
 }
 
-fn push_field(raw: &mut Value, field: Value) {
-    fields_mut(raw).push(field);
+/// An id no field of the item has.
+fn fresh_id(fields: &[Value], taken: &BTreeSet<String>) -> String {
+    (0..)
+        .map(|n| format!("pqsync-x{n}"))
+        .find(|id| !taken.contains(id) && !fields.iter().any(|f| str_of(f, "id") == id))
+        .expect("an unbounded range has a free id")
+}
+
+/// One change to the raw item's fields.
+enum Change {
+    Set {
+        index: usize,
+        value: String,
+        op_type: String,
+    },
+    Remove(usize),
+    Add(Value),
 }
 
 /// Write `keys` of `record` into the raw item: set, add or clear those
-/// slots only. Everything else in `raw` is kept.
-pub fn apply_edit(raw: &mut RawItem, record: &Record, keys: &BTreeSet<String>) {
-    let raw = &mut raw.0;
-    if !raw.is_object() {
-        *raw = json!({});
+/// fields only, through the same binding a read uses. Everything else in
+/// `raw` is kept. An ambiguous item is refused.
+pub fn apply_edit(raw: &mut RawItem, record: &Record, keys: &BTreeSet<String>) -> Result<()> {
+    if !raw.0.is_object() {
+        raw.0 = json!({});
     }
     let slots = slots(record.kind);
+    let (_, binding, _) = bind(&raw.0, record.kind, &slots)?;
+    if binding.ambiguous {
+        bail!("the 1Password item has a field pq-sync uses more than once; edit it in 1Password");
+    }
+
+    let mut changes = Vec::new();
+    let mut new_ids = BTreeSet::new();
+    let mut sections = BTreeSet::new();
+    let fields_now = fields_of(&raw.0)?.to_vec();
     for key in keys {
-        let value = record.value(key);
         if key == "title" {
-            raw["title"] = Value::String(value.to_string());
+            raw.0["title"] = Value::String(record.title().to_string());
         } else if key == "urls" {
             let urls = record.urls();
             if urls.is_empty() {
-                raw.as_object_mut().expect("an object").remove("urls");
+                raw.0.as_object_mut().expect("an object").remove("urls");
             } else {
-                raw["urls"] = Value::Array(
+                raw.0["urls"] = Value::Array(
                     urls.iter()
                         .enumerate()
                         .map(|(i, href)| json!({ "href": href, "primary": i == 0 }))
@@ -438,155 +550,173 @@ pub fn apply_edit(raw: &mut RawItem, record: &Record, keys: &BTreeSet<String>) {
                 );
             }
         } else if let Some(name) = key.strip_prefix(CUSTOM_PREFIX) {
-            write_custom(raw, &slots, name, record.get(key));
-        } else if let Some(slot) = slots.iter().find(|slot| slot.key == key) {
-            write_slot(raw, slot, value);
-        }
-    }
-}
-
-fn write_slot(raw: &mut Value, slot: &Slot, value: &str) {
-    if slot.key != "expiration_date" {
-        return set_slot(raw, slot, value.to_string());
-    }
-    match normalize_expiry(value) {
-        // The form op takes for a month/year field.
-        Some(year_month) => {
-            remove_field(raw, EXPIRY_TEXT_ID);
-            set_slot(raw, slot, year_month.replace('-', "/"));
-        }
-        None if !value.is_empty() => {
-            set_slot(raw, slot, String::new());
-            let text = Slot::new(
-                "expiration_date",
-                EXPIRY_TEXT_ID,
-                OWN_SECTION,
-                "STRING",
-                "expiry date",
-                FieldKind::Text,
-            );
-            set_slot(raw, &text, value.to_string());
-        }
-        None => {
-            remove_field(raw, EXPIRY_TEXT_ID);
-            set_slot(raw, slot, String::new());
-        }
-    }
-}
-
-fn remove_field(raw: &mut Value, id: &str) {
-    fields_mut(raw).retain(|field| str_of(field, "id") != id);
-}
-
-/// Set, add or clear the field of `slot`.
-fn set_slot(raw: &mut Value, slot: &Slot, value: String) {
-    let fields = fields_mut(raw);
-    if let Some(index) = fields
-        .iter()
-        .position(|field| str_of(field, "id") == slot.id)
-    {
-        // pq-sync's own fields go; a built-in one (even in a section, like
-        // a card's PIN) is emptied, so the item keeps its shape.
-        if value.is_empty() && slot.section == OWN_SECTION {
-            fields.remove(index);
-        } else {
-            // A built-in field is emptied, not removed.
-            fields[index]["value"] = Value::String(value);
-        }
-        return;
-    }
-    if value.is_empty() {
-        return;
-    }
-    let mut field = json!({
-        "id": slot.id,
-        "type": slot.op_type,
-        "label": slot.label,
-        "value": value,
-    });
-    if let Some(purpose) = slot.purpose {
-        field["purpose"] = purpose.into();
-    }
-    if let Some((id, label)) = slot.section {
-        field["section"] = json!({ "id": id, "label": label });
-        ensure_section(raw, id, label);
-    }
-    push_field(raw, field);
-}
-
-fn write_custom(raw: &mut Value, slots: &[Slot], name: &str, field: Option<&super::record::Field>) {
-    let is_custom = |candidate: &Value| {
-        let id = str_of(candidate, "id");
-        id != REF_FIELD_ID
-            && id != EXPIRY_TEXT_ID
-            && !slots.iter().any(|slot| slot.id == id)
-            && candidate.get("value").is_none_or(Value::is_string)
-            && custom_name(candidate) == name
-    };
-    let fields = fields_mut(raw);
-    match (fields.iter().position(is_custom), field) {
-        (Some(index), Some(field)) => {
-            fields[index]["value"] = Value::String(field.value.clone());
-            fields[index]["type"] = custom_type(field.kind).into();
-        }
-        (Some(index), None) => {
-            fields.remove(index);
-        }
-        (None, Some(field)) => {
-            let mut n = fields.len();
-            let id = loop {
-                let id = format!("pqsync-x{n}");
-                if !fields.iter().any(|f| str_of(f, "id") == id) {
-                    break id;
+            let field = record.get(key);
+            match (binding.custom.get(key), field) {
+                (Some(&index), Some(field)) => {
+                    let current = str_of(&fields_now[index], "type");
+                    let op_type = match field.kind {
+                        FieldKind::Concealed => "CONCEALED",
+                        FieldKind::Totp => "OTP",
+                        // Text keeps a richer text type (EMAIL, URL, ...).
+                        FieldKind::Text | FieldKind::Urls => match current {
+                            "" | "CONCEALED" | "OTP" => "STRING",
+                            other => other,
+                        },
+                    };
+                    changes.push(Change::Set {
+                        index,
+                        value: field.value.clone(),
+                        op_type: op_type.to_string(),
+                    });
                 }
-                n += 1;
-            };
-            fields.push(json!({
-                "id": id,
-                "type": custom_type(field.kind),
-                "label": name,
-                "value": field.value,
-                "section": { "id": CUSTOM_SECTION_ID, "label": CUSTOM_SECTION_LABEL },
-            }));
-            ensure_section(raw, CUSTOM_SECTION_ID, CUSTOM_SECTION_LABEL);
-        }
-        (None, None) => {}
-    }
-}
-
-/// A keyed fingerprint of everything the CLI shows of an item, minus what
-/// changes on its own (version, timestamps, current TOTP codes, password
-/// strength). When an item's version moves but this does not, something the
-/// CLI cannot show changed (a passkey), and the item is no longer safe to
-/// edit from a template.
-pub fn visible_fingerprint(raw: &RawItem, key: &[u8]) -> String {
-    let mut visible = raw.0.clone();
-    if let Some(item) = visible.as_object_mut() {
-        for volatile in [
-            "version",
-            "created_at",
-            "updated_at",
-            "last_edited_by",
-            "additional_information",
-        ] {
-            item.remove(volatile);
-        }
-        if let Some(Value::Array(fields)) = item.get_mut("fields") {
-            for field in fields.iter_mut().filter_map(Value::as_object_mut) {
-                field.remove("totp");
-                field.remove("password_details");
+                (Some(&index), None) => changes.push(Change::Remove(index)),
+                (None, Some(field)) => {
+                    let id = fresh_id(&fields_now, &new_ids);
+                    new_ids.insert(id.clone());
+                    sections.insert((CUSTOM_SECTION_ID, CUSTOM_SECTION_LABEL));
+                    changes.push(Change::Add(json!({
+                        "id": id,
+                        "type": custom_type(field.kind),
+                        "label": name,
+                        "value": field.value,
+                        "section": { "id": CUSTOM_SECTION_ID, "label": CUSTOM_SECTION_LABEL },
+                    })));
+                }
+                (None, None) => {}
+            }
+        } else if let Some(slot) = slots.iter().find(|slot| slot.key == key) {
+            let value = record.value(key);
+            if slot.key == "expiration_date" {
+                write_expiry(&binding, slot, value, &mut changes, &mut sections);
+            } else {
+                let value = if slot.key == "number" {
+                    normalize_card_number(value)
+                } else {
+                    value.to_string()
+                };
+                write_slot(
+                    binding.slots.get(slot.key).copied(),
+                    slot,
+                    value,
+                    &mut changes,
+                    &mut sections,
+                );
             }
         }
     }
-    // serde_json's maps are sorted, so equal items serialize equally.
-    keyed_hash(key, "op item", visible.to_string().as_bytes())
+
+    for (id, label) in sections {
+        ensure_section(&mut raw.0, id, label);
+    }
+    let fields = fields_mut(&mut raw.0);
+    let mut removed = BTreeSet::new();
+    let mut added = Vec::new();
+    for change in changes {
+        match change {
+            Change::Set {
+                index,
+                value,
+                op_type,
+            } => {
+                fields[index]["value"] = Value::String(value);
+                fields[index]["type"] = Value::String(op_type);
+            }
+            Change::Remove(index) => {
+                removed.insert(index);
+            }
+            Change::Add(field) => added.push(field),
+        }
+    }
+    for index in removed.into_iter().rev() {
+        fields.remove(index);
+    }
+    fields.extend(added);
+    Ok(())
+}
+
+/// Set, add or clear one slot's field. Clearing removes pq-sync's own
+/// fields and empties built-in ones (even in a section, like a card's
+/// PIN), so the item keeps its shape. The field gets the slot's type.
+fn write_slot(
+    bound: Option<usize>,
+    slot: &Slot,
+    value: String,
+    changes: &mut Vec<Change>,
+    sections: &mut BTreeSet<(&'static str, &'static str)>,
+) {
+    match bound {
+        Some(index) if value.is_empty() && slot.section == OWN_SECTION => {
+            changes.push(Change::Remove(index));
+        }
+        Some(index) => changes.push(Change::Set {
+            index,
+            value,
+            op_type: slot.op_type.to_string(),
+        }),
+        None if value.is_empty() => {}
+        None => {
+            let mut field = json!({
+                "id": slot.id,
+                "type": slot.op_type,
+                "label": slot.label,
+                "value": value,
+            });
+            if let Some(purpose) = slot.purpose {
+                field["purpose"] = purpose.into();
+            }
+            if let Some((id, label)) = slot.section {
+                field["section"] = json!({ "id": id, "label": label });
+                sections.insert((id, label));
+            }
+            changes.push(Change::Add(field));
+        }
+    }
+}
+
+/// A month of a year goes in 1Password's month/year field; anything else
+/// in a text field beside it, since the month/year field would refuse it.
+fn write_expiry(
+    binding: &Binding,
+    slot: &Slot,
+    value: &str,
+    changes: &mut Vec<Change>,
+    sections: &mut BTreeSet<(&'static str, &'static str)>,
+) {
+    let bound = binding.slots.get(slot.key).copied();
+    let text = Slot::new(
+        "expiration_date",
+        EXPIRY_TEXT_ID,
+        OWN_SECTION,
+        "STRING",
+        "expiry date",
+        FieldKind::Text,
+    );
+    match normalize_expiry(value) {
+        // The form op takes for a month/year field.
+        Some(year_month) => {
+            write_slot(bound, slot, year_month.replace('-', "/"), changes, sections);
+            write_slot(binding.expiry_text, &text, String::new(), changes, sections);
+        }
+        None if !value.is_empty() => {
+            write_slot(bound, slot, String::new(), changes, sections);
+            write_slot(
+                binding.expiry_text,
+                &text,
+                value.to_string(),
+                changes,
+                sections,
+            );
+        }
+        None => {
+            write_slot(bound, slot, String::new(), changes, sections);
+            write_slot(binding.expiry_text, &text, String::new(), changes, sections);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
 
     fn login_record() -> Record {
         let mut r = Record::new(Kind::Login);
@@ -815,7 +945,7 @@ mod tests {
             .collect();
         let mut without_recovery = changed.clone();
         without_recovery.set("x:Recovery", "", FieldKind::Text);
-        apply_edit(&mut raw, &without_recovery, &keys);
+        apply_edit(&mut raw, &without_recovery, &keys).unwrap();
 
         let item = parse_item(&raw.0.to_string()).unwrap().unwrap();
         let r = &item.record;
@@ -853,7 +983,7 @@ mod tests {
         record.set("email", "e@example.com", FieldKind::Text);
         record.set("totp", "otpauth://totp/z", FieldKind::Totp);
         let keys: BTreeSet<String> = ["email", "totp"].into_iter().map(String::from).collect();
-        apply_edit(&mut raw, &record, &keys);
+        apply_edit(&mut raw, &record, &keys).unwrap();
         let item = parse_item(&raw.0.to_string()).unwrap().unwrap();
         assert_eq!(item.record.value("email"), "e@example.com");
         assert_eq!(item.record.get("totp").unwrap().kind, FieldKind::Totp);
@@ -877,7 +1007,7 @@ mod tests {
             let mut cleared = record.clone();
             cleared.set(key, "", FieldKind::Text);
             let keys: BTreeSet<String> = [key.to_string()].into();
-            apply_edit(&mut raw, &cleared, &keys);
+            apply_edit(&mut raw, &cleared, &keys).unwrap();
             let field = raw.0["fields"]
                 .as_array()
                 .unwrap()
@@ -918,7 +1048,7 @@ mod tests {
         let mut raw = item.raw;
         card.set("expiration_date", "2027-12", FieldKind::Text);
         let keys: BTreeSet<String> = ["expiration_date".to_string()].into();
-        apply_edit(&mut raw, &card, &keys);
+        apply_edit(&mut raw, &card, &keys).unwrap();
         let fields = raw.0["fields"].as_array().unwrap();
         assert!(
             fields
@@ -939,26 +1069,153 @@ mod tests {
         );
     }
 
+    fn custom_field(id: &str, label: &str, value: &str) -> Value {
+        json!({ "id": id, "type": "STRING", "label": label, "value": value,
+                "section": { "id": CUSTOM_SECTION_ID, "label": "Proton Pass custom fields" } })
+    }
+
+    fn note_with(fields: Value) -> RawItem {
+        RawItem(
+            json!({ "id": "n1", "title": "N", "category": "SECURE_NOTE", "version": 1,
+                        "fields": fields }),
+        )
+    }
+
+    fn values_by_id(raw: &RawItem) -> Vec<(String, String)> {
+        raw.0["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| (str_of(f, "id").to_string(), str_of(f, "value").to_string()))
+            .collect()
+    }
+
     #[test]
-    fn the_visible_fingerprint_ignores_what_changes_on_its_own() {
-        let returned = as_returned(&create_json(&login_record(), "s/i"), json!([]));
-        let raw = parse_item(&returned).unwrap().unwrap().raw;
-        let base = visible_fingerprint(&raw, KEY);
+    fn duplicate_custom_names_are_edited_and_removed_as_they_were_read() {
+        let mut raw = note_with(json!([
+            custom_field("a", "dup", "first"),
+            custom_field("b", "dup", "second"),
+            custom_field("c", "dup #2", "literal"),
+        ]));
+        let item = parse_item(&raw.0.to_string()).unwrap().unwrap();
+        assert_eq!(item.record.value("x:dup"), "first");
+        assert_eq!(item.record.value("x:dup #2"), "second");
+        assert_eq!(item.record.value("x:dup #2 #2"), "literal");
 
-        let mut later = raw.clone();
-        later.0["version"] = 7.into();
-        later.0["updated_at"] = "2026-10-26T00:00:00Z".into();
-        for field in later.0["fields"].as_array_mut().unwrap() {
-            if field["type"] == "OTP" {
-                field["totp"] = "654321".into();
-            }
-        }
-        assert_eq!(visible_fingerprint(&later, KEY), base);
+        let mut record = item.record.clone();
+        record.set("x:dup #2", "changed", FieldKind::Text);
+        let keys: BTreeSet<String> = ["x:dup #2".to_string()].into();
+        apply_edit(&mut raw, &record, &keys).unwrap();
+        assert_eq!(
+            values_by_id(&raw),
+            [
+                ("a".into(), "first".into()),
+                ("b".into(), "changed".into()),
+                ("c".into(), "literal".into())
+            ]
+        );
 
-        let mut edited = raw.clone();
-        edited.0["title"] = "Renamed".into();
-        assert_ne!(visible_fingerprint(&edited, KEY), base);
-        assert_ne!(visible_fingerprint(&raw, b"other key"), base);
-        assert!(!base.contains("s3cret"));
+        record.set("x:dup #2", "", FieldKind::Text);
+        apply_edit(&mut raw, &record, &keys).unwrap();
+        assert_eq!(
+            values_by_id(&raw),
+            [("a".into(), "first".into()), ("c".into(), "literal".into())]
+        );
+    }
+
+    #[test]
+    fn unnamed_custom_fields_keep_their_values_and_names() {
+        let mut note = Record::new(Kind::Note);
+        note.set("title", "N", FieldKind::Text);
+        note.add_custom("", "one", FieldKind::Text);
+        note.add_custom("pqsync-x0", "two", FieldKind::Text);
+        let returned = as_returned(&create_json(&note, "s/n"), json!([]));
+        assert_eq!(parse_item(&returned).unwrap().unwrap().record, note);
+    }
+
+    #[test]
+    fn the_proton_reference_is_only_taken_from_pq_syncs_own_field() {
+        let item = |fields: Value| {
+            let raw = json!({ "id": "i", "title": "T", "category": "LOGIN", "version": 1, "fields": fields });
+            parse_item(&raw.to_string()).unwrap().unwrap()
+        };
+        let own = |value: &str, kind: &str| {
+            json!({ "id": REF_FIELD_ID, "type": kind, "label": "Proton reference", "value": value,
+                    "section": { "id": SECTION_ID, "label": "Proton Pass" } })
+        };
+        assert_eq!(
+            item(json!([own("s1/i1", "STRING")])).proton_ref.as_deref(),
+            Some("s1/i1")
+        );
+
+        // Concealed, elsewhere, malformed or twice: not a reference, and
+        // never printed.
+        let concealed = item(json!([own("SYNTHETIC-SECRET", "CONCEALED")]));
+        assert_eq!(concealed.proton_ref, None);
+        assert!(!format!("{concealed:?}").contains("SYNTHETIC-SECRET"));
+        let elsewhere = json!({ "id": REF_FIELD_ID, "type": "STRING", "label": "x", "value": "s/i",
+                                "section": { "id": "other", "label": "Other" } });
+        assert_eq!(item(json!([elsewhere])).proton_ref, None);
+        assert_eq!(
+            item(json!([own("has spaces / x", "STRING")])).proton_ref,
+            None
+        );
+        let twice = item(json!([own("s1/i1", "STRING"), own("s2/i2", "STRING")]));
+        assert_eq!(twice.proton_ref, None);
+        assert!(twice.ambiguous);
+        let shown = format!("{:?}", item(json!([own("s1/i1", "STRING")])));
+        assert!(!shown.contains("s1/i1"), "{shown}");
+    }
+
+    #[test]
+    fn a_slot_is_written_with_its_type_and_only_in_its_section() {
+        let mut identity = Record::new(Kind::Identity);
+        identity.set("title", "Me", FieldKind::Text);
+        identity.set("passport_number", "P-NEW", FieldKind::Concealed);
+        let keys: BTreeSet<String> = ["passport_number".to_string()].into();
+
+        // pq-sync's own field, but stored as text: written concealed.
+        let mut raw = RawItem(
+            json!({ "id": "i", "title": "Me", "category": "IDENTITY", "version": 1,
+            "fields": [{ "id": "pqsync-passport_number", "type": "STRING", "label": "passport number",
+                         "value": "P-OLD", "section": { "id": SECTION_ID, "label": "Proton Pass" } }] }),
+        );
+        apply_edit(&mut raw, &identity, &keys).unwrap();
+        let field = &raw.0["fields"][0];
+        assert_eq!(
+            (field["value"].as_str(), field["type"].as_str()),
+            (Some("P-NEW"), Some("CONCEALED"))
+        );
+
+        // The same id in another section is not the slot: left alone.
+        let mut raw = RawItem(
+            json!({ "id": "i", "title": "Me", "category": "IDENTITY", "version": 1,
+            "fields": [{ "id": "pqsync-passport_number", "type": "STRING", "label": "decoy",
+                         "value": "kept", "section": { "id": "other", "label": "Other" } }] }),
+        );
+        apply_edit(&mut raw, &identity, &keys).unwrap();
+        let fields = raw.0["fields"].as_array().unwrap();
+        assert_eq!(fields[0]["value"], "kept");
+        assert!(fields.iter().any(|f| f["value"] == "P-NEW"
+            && f["type"] == "CONCEALED"
+            && f["section"]["id"] == SECTION_ID));
+    }
+
+    #[test]
+    fn an_item_with_a_reserved_field_twice_is_not_edited() {
+        let field = |value: &str| {
+            json!({ "id": "password", "type": "CONCEALED", "purpose": "PASSWORD",
+                                           "label": "password", "value": value })
+        };
+        let mut raw = RawItem(
+            json!({ "id": "i", "title": "T", "category": "LOGIN", "version": 1,
+                                      "fields": [field("one"), field("two")] }),
+        );
+        let item = parse_item(&raw.0.to_string()).unwrap().unwrap();
+        assert!(item.ambiguous);
+        let mut record = item.record.clone();
+        record.set("password", "three", FieldKind::Concealed);
+        let keys: BTreeSet<String> = ["password".to_string()].into();
+        assert!(apply_edit(&mut raw, &record, &keys).is_err());
     }
 }
