@@ -49,16 +49,6 @@ pub struct MergePlan {
     pub proton_missing: BTreeSet<String>,
 }
 
-impl MergePlan {
-    /// Nothing to write, report or record.
-    pub fn is_settled(&self, base: &BTreeMap<String, FieldHash>) -> bool {
-        self.write_to_op.is_empty()
-            && self.op_only_changes.is_empty()
-            && self.blocked.is_empty()
-            && &self.new_base == base
-    }
-}
-
 pub fn plan(input: MergeInput<'_>) -> MergePlan {
     let proton = input.proton.field_hashes(input.key);
     let op = input.op.field_hashes(input.key);
@@ -75,7 +65,8 @@ pub fn plan(input: MergeInput<'_>) -> MergePlan {
         let in_proton = proton.get(key);
         let in_op = op.get(key);
         // Still missing from Proton: its absence there is not a change.
-        if input.proton_missing.contains(key) && in_proton.is_none() {
+        // Gone from 1Password too, both sides agree it is absent.
+        if input.proton_missing.contains(key) && in_proton.is_none() && in_op.is_some() {
             plan.proton_missing.insert(key.clone());
             if let Some(base) = base {
                 plan.new_base.insert(key.clone(), base.clone());
@@ -174,11 +165,16 @@ mod tests {
     }
 
     #[test]
-    fn nothing_changed_is_settled() {
-        let case = Case::new(agreed(), agreed(), agreed());
-        let plan = case.plan();
-        assert!(plan.is_settled(&agreed().field_hashes(KEY)), "{plan:?}");
-        assert_eq!(plan.new_base, agreed().field_hashes(KEY));
+    fn nothing_changed_needs_nothing() {
+        let plan = Case::new(agreed(), agreed(), agreed()).plan();
+        let base = agreed().field_hashes(KEY);
+        assert_eq!(
+            plan,
+            MergePlan {
+                new_base: base,
+                ..MergePlan::default()
+            }
+        );
     }
 
     #[test]
@@ -277,6 +273,26 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_field_gone_from_both_sides_is_forgotten() {
+        let base = login(&[("title", "Site"), ("note", "1P note")]);
+        let site = login(&[("title", "Site")]);
+        let mut case = Case::new(base, site.clone(), site.clone());
+        case.missing = keys(&["note"]);
+        let plan = case.plan();
+        assert!(plan.op_only_changes.is_empty(), "{plan:?}");
+        assert!(plan.proton_missing.is_empty());
+        assert_eq!(plan.new_base, site.field_hashes(KEY));
+
+        // Proton later gains the same note: an ordinary addition.
+        let next = Case::new(
+            site,
+            login(&[("title", "Site"), ("note", "1P note")]),
+            login(&[("title", "Site")]),
+        );
+        assert_eq!(next.plan().write_to_op, keys(&["note"]));
+    }
+
+    #[test]
     fn a_guarded_item_is_never_written() {
         let proton = login(&[("title", "Site"), ("username", "me"), ("password", "new")]);
         let mut case = Case::new(agreed(), proton, agreed());
@@ -286,7 +302,6 @@ mod tests {
         assert_eq!(plan.blocked, keys(&["password"]));
         // Not written, so not agreed: the base stays.
         assert_eq!(plan.new_base, agreed().field_hashes(KEY));
-        assert!(!plan.is_settled(&agreed().field_hashes(KEY)));
     }
 
     #[test]
