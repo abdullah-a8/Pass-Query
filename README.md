@@ -134,7 +134,7 @@ If you only want to sync by hand, pq-sync can use the sign-ins you already have:
 1. Run `pq-sync setup --as-me`. It records where `pass-cli` and `op` are and checks both sides, and asks for no tokens.
 2. Run `pq-sync run --as-me --dry-run`, then `pq-sync run --as-me`. Missing `Proton · <name>` vaults are created in 1Password on the first run. They are your own vaults: if you add tokens later, give the service account read and write access to them.
 
-`--as-me` only runs at the keyboard: the 1Password app may ask you to approve it, and a background sync would fail whenever the app is locked or your pass-cli session has ended. So `install-agent` needs the tokens. Your own pass-cli login also sees every Proton vault, not just the ones a token was given, so every one is synced unless the config's `include_vaults` or `exclude_vaults` says otherwise.
+`--as-me` only runs at the keyboard: the 1Password app may ask you to approve it, and a background sync would fail whenever the app is locked or your pass-cli session has ended. So `install-agent` needs the tokens. Your own pass-cli login also sees every Proton vault, not just the ones a token was given, shared vaults included, so every one is synced unless the config's `include_vaults` or `exclude_vaults` says otherwise. A name two Proton vaults share (someone's shared vault called `Personal`, say) is never paired: rename one.
 
 With tokens, `pq-sync setup --create-vaults` lets the background sync create missing vaults too; create the service account with `--can-create-vaults`.
 

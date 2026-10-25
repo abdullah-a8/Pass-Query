@@ -46,6 +46,9 @@ impl Proton {
             // Only `login` gets the token, and nothing of 1Password's
             // (its service account token above all) reaches pass-cli.
             .env_remove("PROTON_PASS_PERSONAL_ACCESS_TOKEN")
+            // The session is ours, or pass-cli's default one: never one an
+            // inherited variable picks.
+            .env_remove("PROTON_PASS_SESSION_DIR")
             .env_remove_prefix("OP_")
             // pass-cli reads the lowercase forms too; only ours apply.
             .env_remove("https_proxy")
@@ -422,6 +425,8 @@ mod tests {
         );
         let mut owners = proton(&fake, None);
         owners.session_dir = None;
+        // pass-cli's own default session, whatever the environment says.
+        assert!(owners.command().removes("PROTON_PASS_SESSION_DIR"));
         owners.vaults().unwrap();
         assert!(env_has(
             &fake.calls()[0].env,

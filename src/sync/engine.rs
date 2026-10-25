@@ -338,12 +338,39 @@ impl Engine<'_> {
             }
         };
 
+        // A name more than one Proton vault has (someone's shared vault
+        // named like one of the owner's) cannot say which to pair.
+        let mut named: BTreeMap<&str, usize> = BTreeMap::new();
+        for vault in &proton_vaults {
+            *named.entry(vault.name.as_str()).or_default() += 1;
+        }
+        let mut shared_names: BTreeMap<String, usize> = named
+            .into_iter()
+            .filter(|(_, count)| *count > 1)
+            .map(|(name, count)| (name.to_string(), count))
+            .collect();
+
         let mut runs = Vec::new();
         for proton_vault in proton_vaults {
             let paired = self
                 .state
                 .vault_for_proton(&proton_vault.id)
                 .map(|pair| pair.op_vault.clone());
+            if paired.is_none() && shared_names.contains_key(&proton_vault.name) {
+                // Reported once per name.
+                let Some(count) = shared_names.insert(proton_vault.name.clone(), 0) else {
+                    continue;
+                };
+                if count == 0 {
+                    continue;
+                }
+                self.report.push(Event::Vault(format!(
+                    "{count} Proton vaults are named '{}', so none of them is paired by name: \
+                     rename all but one",
+                    crate::text::printable(&proton_vault.name)
+                )));
+                continue;
+            }
             let op_vault = match paired {
                 Some(id) => match op_vaults.iter().find(|vault| vault.id == id) {
                     Some(vault) => vault.clone(),

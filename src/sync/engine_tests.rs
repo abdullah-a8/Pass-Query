@@ -799,3 +799,35 @@ fn a_dry_run_says_which_vaults_it_would_create() {
     );
     assert_eq!(w.op.vaults.len(), 1);
 }
+
+#[test]
+fn a_vault_name_two_proton_vaults_share_pairs_with_neither() {
+    let mut w = World::new();
+    // Someone else's shared vault, also named "Personal", listed first.
+    w.proton.vaults.insert(
+        0,
+        super::api::Vault {
+            id: "shared".into(),
+            name: "Personal".into(),
+        },
+    );
+    w.proton.add("shared", login("Theirs", "them", "pw"));
+    w.proton.add("ps1", login("Mine", "me", "pw"));
+    w.op.add_native("ov1", &login("From 1Password", "me", "pw"));
+    let report = w.sync();
+    assert!(
+        has(
+            &report,
+            |e| matches!(e, Event::Vault(m) if m.contains("2 Proton vaults are named 'Personal'"))
+        ),
+        "{report}"
+    );
+    let reported = report
+        .events
+        .iter()
+        .filter(|e| matches!(e, Event::Vault(m) if m.contains("named 'Personal'")))
+        .count();
+    assert_eq!(reported, 1, "{report}");
+    assert!(w.state.vaults.is_empty());
+    assert!(w.op.writes.is_empty() && w.proton.writes.is_empty());
+}
