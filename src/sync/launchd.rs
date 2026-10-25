@@ -75,11 +75,17 @@ pub fn install(program: &Path, interval: u64) -> Result<PathBuf> {
     if interval < 300 {
         bail!("an interval under 5 minutes would exhaust 1Password's daily request budget");
     }
+    if super::secrets::from_env() {
+        bail!(
+            "the agent reads its tokens from the Keychain, not this shell's environment: \
+             run `pq-sync setup` without PQ_SYNC_SECRETS_FROM_ENV first"
+        );
+    }
     let path = plist_path()?;
     std::fs::create_dir_all(path.parent().context("plist path has no directory")?)?;
     std::fs::write(&path, plist(program, interval))
         .with_context(|| format!("Failed to write {}", path.display()))?;
-    let _ = launchctl(&["bootout", &domain(), &path.display().to_string()]);
+    unload(&path)?;
     let output = launchctl(&["bootstrap", &domain(), &path.display().to_string()])?;
     if !output.status.success() {
         bail!(
@@ -90,12 +96,30 @@ pub fn install(program: &Path, interval: u64) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// launchctl's exit codes for a service that is not loaded: ESRCH, and
+/// "could not find specified service".
+fn not_loaded(code: Option<i32>) -> bool {
+    matches!(code, Some(3 | 113))
+}
+
+/// Unload the agent if it is loaded; an error if it stays loaded.
+fn unload(path: &Path) -> Result<()> {
+    let output = launchctl(&["bootout", &domain(), &path.display().to_string()])?;
+    if output.status.success() || not_loaded(output.status.code()) {
+        return Ok(());
+    }
+    bail!(
+        "launchctl bootout failed, so the agent may still be loaded: {}",
+        crate::text::printable(String::from_utf8_lossy(&output.stderr).trim())
+    )
+}
+
 pub fn uninstall() -> Result<Option<PathBuf>> {
     let path = plist_path()?;
     if !path.exists() {
         return Ok(None);
     }
-    let _ = launchctl(&["bootout", &domain(), &path.display().to_string()]);
+    unload(&path)?;
     std::fs::remove_file(&path).with_context(|| format!("Failed to remove {}", path.display()))?;
     Ok(Some(path))
 }
@@ -112,6 +136,12 @@ mod tests {
         assert!(plist.contains("<integer>1800</integer>"));
         assert!(plist.contains("<string>/dev/null</string>"));
         assert!(plist.contains(LABEL));
+    }
+
+    #[test]
+    fn only_an_agent_that_is_not_loaded_counts_as_unloaded() {
+        assert!(not_loaded(Some(3)) && not_loaded(Some(113)));
+        assert!(!not_loaded(Some(1)) && !not_loaded(Some(5)) && !not_loaded(None));
     }
 
     #[test]

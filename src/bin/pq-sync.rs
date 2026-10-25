@@ -213,22 +213,29 @@ fn check_proxy(proxy: &str) -> Result<()> {
     if proxy.is_empty() {
         return Ok(());
     }
-    let host_port = proxy
-        .split_once("://")
-        .map_or(proxy, |(_, rest)| rest)
-        .trim_end_matches('/');
+    let host_port = proxy_host_port(proxy);
     let address = host_port
         .to_socket_addrs()
         .ok()
         .and_then(|mut addresses| addresses.next())
-        .with_context(|| format!("the proxy {} is not a host:port", printable(proxy)))?;
+        .with_context(|| format!("the proxy {} is not a host:port", printable(host_port)))?;
     TcpStream::connect_timeout(&address, Duration::from_secs(5)).with_context(|| {
         format!(
             "the proxy {} is unreachable (is Tailscale up?); nothing was synced",
-            printable(proxy)
+            printable(host_port)
         )
     })?;
     Ok(())
+}
+
+/// A proxy URL's `host:port`, without its scheme, path or credentials: the
+/// only part that may be shown.
+fn proxy_host_port(proxy: &str) -> &str {
+    let rest = proxy.split_once("://").map_or(proxy, |(_, rest)| rest);
+    let authority = rest.split('/').next().unwrap_or(rest);
+    authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host)
 }
 
 fn proton(config: &Config, dir: &Path) -> Result<Proton> {
@@ -315,6 +322,8 @@ fn run(dry_run: bool, quiet: bool, allow_mass_delete: bool, as_me: bool) -> Resu
 fn which(program: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
+        // A relative entry would be resolved from wherever pq-sync runs.
+        .filter(|dir| dir.is_absolute())
         .map(|dir| dir.join(program))
         .find(|candidate| {
             #[cfg(unix)]
@@ -440,7 +449,17 @@ fn status() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::utc;
+    use super::{proxy_host_port, utc};
+
+    #[test]
+    fn only_a_proxys_host_and_port_are_shown() {
+        assert_eq!(
+            proxy_host_port("http://user:pa55@100.94.76.106:8888/"),
+            "100.94.76.106:8888"
+        );
+        assert_eq!(proxy_host_port("http://proxy:3128"), "proxy:3128");
+        assert_eq!(proxy_host_port("proxy:3128"), "proxy:3128");
+    }
 
     #[test]
     fn unix_times_format_as_utc() {

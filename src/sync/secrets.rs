@@ -46,7 +46,8 @@ impl Secret {
     }
 }
 
-fn from_env() -> bool {
+/// Whether the secrets come from the environment rather than the Keychain.
+pub fn from_env() -> bool {
     !cfg!(target_os = "macos")
         || std::env::var_os("PQ_SYNC_SECRETS_FROM_ENV").is_some_and(|v| v == "1")
 }
@@ -99,14 +100,18 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn unhex(text: &str) -> Result<Vec<u8>> {
-    let text = text.trim();
+    let text = text.trim().as_bytes();
     if text.len() < 32 || !text.len().is_multiple_of(2) {
         bail!("bad length");
     }
-    (0..text.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).context("not hex"))
-        .collect()
+    if !text.iter().all(u8::is_ascii_hexdigit) {
+        bail!("not hex");
+    }
+    let digit = |c: u8| (c as char).to_digit(16).unwrap_or(0) as u8;
+    Ok(text
+        .chunks(2)
+        .map(|pair| digit(pair[0]) << 4 | digit(pair[1]))
+        .collect())
 }
 
 #[cfg(target_os = "macos")]
@@ -166,5 +171,7 @@ mod tests {
         assert!(unhex("abc").is_err());
         assert!(unhex(&"zz".repeat(16)).is_err());
         assert!(unhex("00").is_err(), "too short to be a key");
+        assert!(unhex(&format!("+f{}", "00".repeat(15))).is_err());
+        assert!(unhex(&format!("é{}", "0".repeat(30))).is_err());
     }
 }
