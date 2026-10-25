@@ -39,7 +39,9 @@ impl Command {
             args: Vec::new(),
             env: Vec::new(),
             env_remove: Vec::new(),
-            env_remove_prefixes: Vec::new(),
+            // pq-sync's own secrets, when they come from the environment,
+            // are no tool's business: each gets only what it is given.
+            env_remove_prefixes: vec!["PQ_SYNC_".to_string()],
             stdin: None,
             timeout,
         }

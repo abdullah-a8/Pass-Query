@@ -89,19 +89,33 @@ impl Report {
 
     /// Whether the owner has something to do.
     pub fn needs_attention(&self) -> bool {
-        self.events.iter().any(|event| {
-            matches!(
-                event,
-                Event::OpOnlyChange { .. }
-                    | Event::Blocked { .. }
-                    | Event::Conflict { .. }
-                    | Event::BrakeHeld { .. }
-                    | Event::Vault(_)
-                    | Event::ItemFailed { .. }
-                    | Event::CreatedInProton { .. }
-                    | Event::Guarded { .. }
-            )
-        })
+        self.events.iter().any(Event::needs_attention)
+    }
+
+    /// The events that ask something of the owner, one per line.
+    pub fn attention(&self) -> String {
+        self.events
+            .iter()
+            .filter(|event| event.needs_attention())
+            .map(|event| format!("{event}\n"))
+            .collect()
+    }
+}
+
+impl Event {
+    /// Whether it asks something of the owner.
+    pub fn needs_attention(&self) -> bool {
+        matches!(
+            self,
+            Event::OpOnlyChange { .. }
+                | Event::Blocked { .. }
+                | Event::Conflict { .. }
+                | Event::BrakeHeld { .. }
+                | Event::Vault(_)
+                | Event::ItemFailed { .. }
+                | Event::CreatedInProton { .. }
+                | Event::Guarded { .. }
+        )
     }
 }
 

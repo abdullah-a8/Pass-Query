@@ -771,3 +771,14 @@ fn creating_a_vault_counts_as_a_write() {
     w.sync();
     assert_eq!(w.op.vaults.len(), 2);
 }
+
+#[test]
+fn requests_not_made_by_the_service_account_are_not_counted() {
+    let mut w = World::new();
+    w.config.record_op_requests = false;
+    w.proton.add("ps1", login("Site", "alice", "pw1"));
+    w.sync();
+    assert!(w.op.requests() > 0);
+    assert_eq!(w.state.op_requests_today(NOW), 0);
+    assert_eq!(w.state.items.len(), 1, "the state is still saved");
+}
