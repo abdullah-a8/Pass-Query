@@ -13,7 +13,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::api::{OpApi, OpSummary, Vault};
+use super::api::{OpApi, OpSummary, Vault, op_requests};
 use super::exec::{Command, Output};
 use super::op_json::{self, OpItem, RawItem};
 use super::secret::{SecretString, parse_json};
@@ -176,7 +176,7 @@ impl OnePassword {
 impl OpApi for OnePassword {
     fn vaults(&mut self) -> Result<Vec<Vault>> {
         let command = self.command().args(["vault", "list", "--format", "json"]);
-        let output = self.ok("op vault list", command, 1)?;
+        let output = self.ok("op vault list", command, op_requests::VAULT_LIST)?;
         let vaults: Vec<VaultJson> = parse_json(output.stdout.expose(), "op vault list output")?;
         Ok(vaults
             .into_iter()
@@ -192,7 +192,7 @@ impl OpApi for OnePassword {
         let command = self
             .command()
             .args(["item", "list", "--vault", vault, "--format", "json"]);
-        let output = self.ok("op item list", command, 1)?;
+        let output = self.ok("op item list", command, op_requests::ITEM_LIST)?;
         // An empty vault prints nothing, not [].
         let text = output.stdout.expose().trim();
         let items: Vec<ItemJson> = if text.is_empty() {
@@ -216,7 +216,7 @@ impl OpApi for OnePassword {
         let command = self.command().args([
             "item", "get", item, "--vault", vault, "--format", "json", "--reveal",
         ]);
-        let output = self.send(command, 1)?;
+        let output = self.send(command, op_requests::ITEM_GET)?;
         if !output.status.success() {
             if problem(&output.stderr).is_none() && is_missing(&output.stderr) {
                 return Ok(None);
@@ -231,7 +231,7 @@ impl OpApi for OnePassword {
             .command()
             .args(["item", "create", "--vault", vault, "--format", "json", "-"])
             .stdin(json.clone());
-        let output = self.ok("op item create", command, 2)?;
+        let output = self.ok("op item create", command, op_requests::ITEM_CREATE)?;
         Self::parse_item(&output, "op item create")
     }
 
@@ -240,7 +240,7 @@ impl OpApi for OnePassword {
             .command()
             .args(["item", "edit", item, "--vault", vault, "--format", "json"])
             .stdin(SecretString::new(raw.0.to_string()));
-        let output = self.ok("op item edit", command, 2)?;
+        let output = self.ok("op item edit", command, op_requests::ITEM_EDIT)?;
         Self::parse_item(&output, "op item edit")
     }
 
@@ -248,7 +248,7 @@ impl OpApi for OnePassword {
         let command = self
             .command()
             .args(["item", "delete", item, "--vault", vault, "--archive"]);
-        let output = self.send(command, 2)?;
+        let output = self.send(command, op_requests::ITEM_ARCHIVE)?;
         if output.status.success()
             || (problem(&output.stderr).is_none() && is_missing(&output.stderr))
         {
@@ -269,7 +269,7 @@ impl OpApi for OnePassword {
             "--format",
             "json",
         ]);
-        let output = self.ok("op item move", command, 3)?;
+        let output = self.ok("op item move", command, op_requests::ITEM_MOVE)?;
         #[derive(Deserialize)]
         struct Moved {
             id: String,
@@ -282,7 +282,7 @@ impl OpApi for OnePassword {
         let command = self
             .command()
             .args(["vault", "create", name, "--format", "json"]);
-        let output = self.ok("op vault create", command, 1)?;
+        let output = self.ok("op vault create", command, op_requests::VAULT_CREATE)?;
         let vault: VaultJson = parse_json(output.stdout.expose(), "op vault create output")?;
         if vault.id.is_empty() {
             bail!("op vault create did not return the vault's ID");
@@ -329,7 +329,7 @@ mod tests {
         );
         assert!(call.env.lines().any(|l| l == "OP_DEBUG=<unset>"));
         assert!(!fake.all_args().contains("ops_secret_token"));
-        assert_eq!(op.requests(), 1);
+        assert_eq!(op.requests(), op_requests::VAULT_LIST);
     }
 
     #[test]
@@ -394,7 +394,10 @@ mod tests {
         assert!(calls[0].stdin.contains("s3cret-pw") && calls[1].stdin.contains("s3cret-pw"));
         assert!(!fake.all_args().contains("s3cret-pw"));
         assert!(!fake.all_args().contains("alice"));
-        assert_eq!(op.requests(), 4);
+        assert_eq!(
+            op.requests(),
+            op_requests::ITEM_CREATE + op_requests::ITEM_EDIT
+        );
     }
 
     #[test]
