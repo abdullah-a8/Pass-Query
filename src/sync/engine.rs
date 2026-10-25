@@ -15,7 +15,7 @@
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::api::{OpApi, OpSummary, ProtonApi, ProtonSummary, Vault};
+use super::api::{OpApi, OpSummary, ProtonApi, ProtonSummary, Vault, op_requests};
 use super::merge::{self, MergeInput};
 use super::onepassword::OpProblem;
 use super::op_json::{self, OpItem, RawItem};
@@ -390,7 +390,7 @@ impl Engine<'_> {
         let vault = match found {
             Some(vault) => vault,
             None if self.config.create_op_vaults && !self.config.dry_run => {
-                if !self.op_allows(1, true) {
+                if !self.op_allows(op_requests::VAULT_CREATE, true) {
                     return Ok(None);
                 }
                 match self.op.create_vault(&name) {
@@ -513,7 +513,7 @@ impl Engine<'_> {
     ) -> Result<BTreeMap<(usize, String), OpItem>> {
         let mut read = BTreeMap::new();
         for (index, id) in items {
-            if !self.op_allows(1, false) {
+            if !self.op_allows(op_requests::ITEM_GET, false) {
                 break;
             }
             let run = &runs[*index];
@@ -592,7 +592,7 @@ impl Engine<'_> {
                         });
                         continue;
                     }
-                    if !self.op_allows(3, true) {
+                    if !self.op_allows(op_requests::ITEM_MOVE, true) {
                         continue;
                     }
                     match self
@@ -801,7 +801,7 @@ impl Engine<'_> {
                 });
                 continue;
             }
-            if !self.op_allows(2, true) {
+            if !self.op_allows(op_requests::ITEM_CREATE, true) {
                 break;
             }
             let json = op_json::create_json(&item.record, &proton_ref(&target.proton.id, id));
@@ -1015,7 +1015,7 @@ impl Engine<'_> {
                     });
                     continue;
                 }
-                if !self.op_allows(2, true) {
+                if !self.op_allows(op_requests::ITEM_EDIT, true) {
                     continue;
                 }
                 let mut raw = item.raw.clone();
@@ -1113,7 +1113,7 @@ impl Engine<'_> {
         title: &str,
         newly_guarded: &mut bool,
     ) -> Result<Option<(OpItem, BTreeMap<String, FieldHash>)>> {
-        if !self.op_allows(1, false) {
+        if !self.op_allows(op_requests::ITEM_GET, false) {
             return Ok(None);
         }
         let item = match self.op.get(&pair.op_vault, &pair.op_item) {
@@ -1191,7 +1191,7 @@ impl Engine<'_> {
                             self.report.push(Event::ArchivedInOp { title });
                             continue;
                         }
-                        if !self.op_allows(2, true) {
+                        if !self.op_allows(op_requests::ITEM_ARCHIVE, true) {
                             continue;
                         }
                         match self.op.archive(&pair.op_vault, &pair.op_item) {
