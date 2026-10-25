@@ -13,12 +13,17 @@
 //! - [`merge`]: the field-level three-way merge of one paired item.
 //! - [`secret`]: text that holds secrets and never prints them.
 //! - [`state`]: the private state file: pairs, change markers, field hashes.
+//! - [`config`], [`secrets`], [`lock`], [`tty`], [`launchd`]: what the
+//!   `pq-sync` binary needs around a run.
 
 pub mod api;
+pub mod config;
 pub mod engine;
 mod engine_tests;
 pub mod exec;
 mod fake_cli;
+pub mod launchd;
+pub mod lock;
 mod memory;
 pub mod merge;
 pub mod onepassword;
@@ -28,4 +33,6 @@ pub mod proton_json;
 pub mod record;
 pub mod report;
 pub mod secret;
+pub mod secrets;
 pub mod state;
+pub mod tty;
