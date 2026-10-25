@@ -357,7 +357,13 @@ fn bind(raw: &Value, kind: Kind, slots: &[Slot]) -> Result<(Record, Binding, Opt
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     let mut custom_names: BTreeSet<String> = BTreeSet::new();
     for (index, field) in fields.iter().enumerate() {
-        if !field.is_object() {
+        // An edit replaces a field's value and type: both must be what the
+        // read takes them for.
+        if !field.is_object()
+            || field
+                .get("type")
+                .is_some_and(|t| !t.is_null() && !t.is_string())
+        {
             binding.ambiguous = true;
             continue;
         }
@@ -451,6 +457,9 @@ fn bind(raw: &Value, kind: Kind, slots: &[Slot]) -> Result<(Record, Binding, Opt
                 match url.get("href").and_then(Value::as_str) {
                     Some(href)
                         if url.is_object()
+                            && url
+                                .get("primary")
+                                .is_none_or(|p| p.is_null() || p.is_boolean())
                             && !href.trim().is_empty()
                             && !href.contains(['\n', '\r'])
                             && hrefs.insert(href.trim()) => {}
@@ -1524,5 +1533,38 @@ mod tests {
         ] {
             assert!(!login(fine.clone()).ambiguous, "{fine}");
         }
+    }
+
+    #[test]
+    fn nested_properties_an_edit_overwrites_must_be_readable() {
+        let cases = [
+            (
+                json!({ "id": "i", "title": "T", "category": "LOGIN", "version": 1,
+                     "fields": [{ "id": "password", "purpose": "PASSWORD", "label": "password",
+                                  "value": "OLD", "type": { "secret": "RAW-ONLY-TYPE" } }] }),
+                "password",
+            ),
+            (
+                json!({ "id": "i", "title": "T", "category": "LOGIN", "version": 1, "fields": [],
+                     "urls": [{ "href": "https://a.test", "primary": { "secret": "RAW-ONLY-PRIMARY" } }] }),
+                "urls",
+            ),
+        ];
+        for (json, key) in cases {
+            let item = parse_item(&json.to_string()).unwrap().unwrap();
+            assert!(item.ambiguous, "{json}");
+            let mut record = item.record.clone();
+            record.set("password", "NEW", FieldKind::Concealed);
+            record.set_urls(&["https://a.test", "https://b.test"]);
+            let mut raw = RawItem(json.clone());
+            let keys: BTreeSet<String> = [key.to_string()].into();
+            assert!(apply_edit(&mut raw, &record, &keys).is_err());
+            assert_eq!(raw.0, json, "a refused edit changes nothing");
+        }
+        // Ordinary items have text types and boolean primaries.
+        let fine = json!({ "id": "i", "title": "T", "category": "LOGIN", "version": 1,
+            "fields": [{ "id": "password", "type": "CONCEALED", "purpose": "PASSWORD", "value": "x" }],
+            "urls": [{ "href": "https://a.test", "primary": true, "label": "website" }] });
+        assert!(!parse_item(&fine.to_string()).unwrap().unwrap().ambiguous);
     }
 }
