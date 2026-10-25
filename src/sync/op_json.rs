@@ -357,12 +357,22 @@ fn bind(raw: &Value, kind: Kind, slots: &[Slot]) -> Result<(Record, Binding, Opt
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     let mut custom_names: BTreeSet<String> = BTreeSet::new();
     for (index, field) in fields.iter().enumerate() {
-        // An edit replaces a field's value and type: both must be what the
-        // read takes them for.
+        // An edit replaces a field's value and type, and removing a field
+        // takes its label and section along: all must be what the read
+        // takes them for.
+        let text_or_absent =
+            |value: Option<&Value>| value.is_none_or(|v| v.is_null() || v.is_string());
+        let section_ok = match field.get("section") {
+            None | Some(Value::Null) => true,
+            Some(section @ Value::Object(_)) => {
+                text_or_absent(section.get("id")) && text_or_absent(section.get("label"))
+            }
+            Some(_) => false,
+        };
         if !field.is_object()
-            || field
-                .get("type")
-                .is_some_and(|t| !t.is_null() && !t.is_string())
+            || !text_or_absent(field.get("type"))
+            || !text_or_absent(field.get("label"))
+            || !section_ok
         {
             binding.ambiguous = true;
             continue;
@@ -460,6 +470,9 @@ fn bind(raw: &Value, kind: Kind, slots: &[Slot]) -> Result<(Record, Binding, Opt
                             && url
                                 .get("primary")
                                 .is_none_or(|p| p.is_null() || p.is_boolean())
+                            && url
+                                .get("label")
+                                .is_none_or(|l| l.is_null() || l.is_string())
                             && !href.trim().is_empty()
                             && !href.contains(['\n', '\r'])
                             && hrefs.insert(href.trim()) => {}
@@ -1627,5 +1640,44 @@ mod tests {
             parse_item(&raw.0.to_string()).unwrap().unwrap().record,
             record
         );
+    }
+
+    #[test]
+    fn metadata_the_read_cannot_represent_makes_an_item_ambiguous() {
+        let login = |fields: Value, urls: Value| {
+            let raw = json!({ "id": "i", "title": "T", "category": "LOGIN", "version": 1,
+                              "fields": fields, "urls": urls });
+            parse_item(&raw.to_string()).unwrap().unwrap()
+        };
+        let email = |extra: Value| {
+            let mut field = json!({ "id": "pqsync-email", "type": "EMAIL", "value": "old@example.test",
+                                    "label": "email", "section": { "id": SECTION_ID, "label": "Proton Pass" } });
+            for (key, value) in extra.as_object().unwrap() {
+                field[key] = value.clone();
+            }
+            json!([field])
+        };
+        for fields in [
+            email(json!({ "label": { "secret": "RAW-ONLY" } })),
+            email(json!({ "section": "pq-sync" })),
+            email(json!({ "section": { "id": SECTION_ID, "label": { "secret": "RAW-ONLY" } } })),
+        ] {
+            assert!(login(fields.clone(), json!([])).ambiguous, "{fields}");
+        }
+        let url = json!([{ "href": "https://old.test", "primary": true, "label": { "secret": "RAW-ONLY" } }]);
+        assert!(login(json!([]), url).ambiguous);
+
+        // Well-formed metadata is fine, and goes with an entry Proton removed.
+        let item = login(
+            email(json!({})),
+            json!([{ "href": "https://old.test", "primary": true, "label": "site" }]),
+        );
+        assert!(!item.ambiguous);
+        let mut record = item.record.clone();
+        record.set("email", "", FieldKind::Text);
+        let mut raw = item.raw;
+        let keys: BTreeSet<String> = ["email".to_string()].into();
+        apply_edit(&mut raw, &record, &keys).unwrap();
+        assert!(raw.0["fields"].as_array().unwrap().is_empty());
     }
 }
