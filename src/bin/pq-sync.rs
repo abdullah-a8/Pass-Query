@@ -286,6 +286,13 @@ fn proton(config: &Config, dir: &Path) -> Result<Proton> {
 
 fn run(dry_run: bool, quiet: bool, allow_mass_delete: bool, as_me: bool) -> Result<()> {
     let config = Config::load(&config::config_path()?)?;
+    // A relative program would be found from wherever pq-sync runs, and be
+    // handed the tokens.
+    for (name, program) in [("pass_cli", &config.pass_cli), ("op", &config.op)] {
+        if !Path::new(program).is_absolute() {
+            bail!("the config's {name} must be an absolute path; run: pq-sync setup");
+        }
+    }
     let dir = state_dir()?;
     let _lock = RunLock::acquire(&dir.join("run.lock"))?;
     let key = secrets::state_key()?;

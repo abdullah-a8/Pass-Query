@@ -21,6 +21,7 @@ const FAKE_PASS_CLI: &str = r#"#!/bin/sh
 d="$FAKE_DIR"
 printf '%s\n' "pass-cli $*" >> "$d/args"
 printf '%s\n' "${PROTON_PASS_PERSONAL_ACCESS_TOKEN:-}" >> "$d/pass-cli-token-env"
+env | grep '^PQ_SYNC_' >> "$d/leaked-env"
 case "$1 $2" in
 "info --output") echo '{"release_track":"stable","id":"u"}' ;;
 "vault list") echo '{"vaults":[{"name":"Personal","vault_id":"v1","share_id":"ps1"}]}' ;;
@@ -35,6 +36,7 @@ const FAKE_OP: &str = r#"#!/bin/sh
 d="$FAKE_DIR"
 printf '%s\n' "op $*" >> "$d/args"
 printf '%s\n' "${OP_SERVICE_ACCOUNT_TOKEN:-}" >> "$d/op-token-env"
+env | grep '^PQ_SYNC_' >> "$d/leaked-env"
 mkdir -p "$d/items"
 case "$1 $2" in
 "vault list") echo '[{"id":"ov1","name":"Proton · Personal"}]' ;;
@@ -132,6 +134,8 @@ impl World {
     }
 
     fn assert_no_leaks(&self, output: &Output) {
+        let leaked = read(&self.path("fake/leaked-env")).unwrap_or_default();
+        assert!(leaked.is_empty(), "pq-sync's own variables reached a CLI");
         let args = self.args();
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -291,4 +295,18 @@ fn a_quiet_dry_run_that_fails_keeps_nothing() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("unreachable"));
     assert!(!world.path("state/pq-sync/last-run.txt").exists());
+}
+
+#[test]
+fn a_config_with_a_relative_program_is_refused() {
+    let world = World::new("");
+    let config = world.path("config/pq-sync/config.json");
+    let text = fs::read_to_string(&config).unwrap();
+    let relative = text.replace(world.path("bin/op").to_str().unwrap(), "bin/op");
+    assert_ne!(text, relative);
+    fs::write(&config, relative).unwrap();
+    let output = world.run(&["run"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("absolute path"));
+    assert!(world.args().is_empty());
 }
