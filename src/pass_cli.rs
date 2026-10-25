@@ -22,7 +22,7 @@ pub enum SessionProblem {
 }
 
 impl SessionProblem {
-    fn from_stderr(stderr: &str) -> Option<Self> {
+    pub fn from_stderr(stderr: &str) -> Option<Self> {
         let s = stderr.to_lowercase();
         // An ended session wins: pass-cli can print a lock diagnostic early
         // (during startup telemetry) and then exit because the session was
@@ -109,7 +109,7 @@ impl std::error::Error for ItemUnavailable {}
 /// DeletedShare codes, a vault deleted between fetching the item and opening
 /// it, or a bare HTTP status when pass-cli printed only that (it does for
 /// item revisions).
-fn item_is_gone(stderr: &str) -> bool {
+pub fn item_is_gone(stderr: &str) -> bool {
     const MARKERS: [&str; 6] = [
         "Reason: NotExists",
         "Reason: DeletedShare",
@@ -139,7 +139,7 @@ fn pass_cli_command() -> Command {
 
 /// The error for a failed pass-cli call: its session problem when stderr
 /// shows one, otherwise `what` with a summary of pass-cli's message.
-fn failure(what: &str, stderr: &[u8]) -> anyhow::Error {
+pub fn failure(what: &str, stderr: &[u8]) -> anyhow::Error {
     let stderr = String::from_utf8_lossy(stderr);
     match SessionProblem::from_stderr(&stderr) {
         Some(problem) => anyhow::Error::new(problem),
@@ -150,7 +150,7 @@ fn failure(what: &str, stderr: &[u8]) -> anyhow::Error {
 /// What pq shows of a failed call's stderr: pass-cli's top-level error
 /// message and the Proton error code, escaped and shortened. Never the raw
 /// text, which can hold log lines with tokens or response bodies.
-fn summarize(stderr: &str) -> String {
+pub fn summarize(stderr: &str) -> String {
     const MAX_CHARS: usize = 200;
     let message = stderr
         .lines()
