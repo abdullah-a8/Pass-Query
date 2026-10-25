@@ -75,6 +75,12 @@ impl Command {
         self
     }
 
+    /// Whether the inherited `key` is left out (and not set again).
+    #[cfg(test)]
+    pub fn removes(&self, key: &str) -> bool {
+        self.env_remove.iter().any(|k| k == key) && !self.env.iter().any(|(k, _)| k == key)
+    }
+
     #[cfg(test)]
     pub fn removes_prefix(&self, prefix: &str) -> bool {
         self.env_remove_prefixes.iter().any(|p| p == prefix)

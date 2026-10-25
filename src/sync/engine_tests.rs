@@ -782,3 +782,99 @@ fn requests_not_made_by_the_service_account_are_not_counted() {
     assert_eq!(w.state.op_requests_today(NOW), 0);
     assert_eq!(w.state.items.len(), 1, "the state is still saved");
 }
+
+#[test]
+fn a_dry_run_says_which_vaults_it_would_create() {
+    let mut w = World::new();
+    w.config.create_op_vaults = true;
+    w.config.dry_run = true;
+    w.proton.vault("ps2", "Work");
+    let report = w.sync();
+    assert!(
+        has(
+            &report,
+            |e| matches!(e, Event::Vault(m) if m.contains("would create 'Proton · Work'"))
+        ),
+        "{report}"
+    );
+    assert_eq!(w.op.vaults.len(), 1);
+}
+
+#[test]
+fn a_vault_name_two_proton_vaults_share_pairs_with_neither() {
+    let mut w = World::new();
+    // Someone else's shared vault, also named "Personal", listed first.
+    w.proton.vaults.insert(
+        0,
+        super::api::Vault {
+            id: "shared".into(),
+            name: "Personal".into(),
+        },
+    );
+    w.proton.add("shared", login("Theirs", "them", "pw"));
+    w.proton.add("ps1", login("Mine", "me", "pw"));
+    w.op.add_native("ov1", &login("From 1Password", "me", "pw"));
+    let report = w.sync();
+    assert!(
+        has(
+            &report,
+            |e| matches!(e, Event::Vault(m) if m.contains("2 Proton vaults are named 'Personal'"))
+        ),
+        "{report}"
+    );
+    let reported = report
+        .events
+        .iter()
+        .filter(|e| matches!(e, Event::Vault(m) if m.contains("named 'Personal'")))
+        .count();
+    assert_eq!(reported, 1, "{report}");
+    assert!(w.state.vaults.is_empty());
+    assert!(w.op.writes.is_empty() && w.proton.writes.is_empty());
+}
+
+#[test]
+fn a_paired_vault_this_sign_in_cannot_reach_holds_back_deletions() {
+    let mut w = World::new();
+    w.proton.vault("ps2", "Work");
+    w.op.vault("ov2", "Proton · Work");
+    let id = w.proton.add("ps1", login("Site", "alice", "pw1"));
+    w.sync();
+    let op_id = w.op_item_of(&id);
+    // Moved in 1Password into a vault the next sign-in cannot see.
+    w.op.move_item(&op_id, "ov1", "ov2").unwrap();
+    w.op.vaults.retain(|v| v.id != "ov2");
+    let report = w.sync();
+    assert!(
+        !has(&report, |e| matches!(e, Event::TrashedInProton { .. })),
+        "{report}"
+    );
+    assert_eq!(w.proton.active_in("ps1").len(), 1);
+}
+
+#[test]
+fn a_paired_proton_vault_out_of_reach_holds_back_deletions() {
+    let mut w = World::new();
+    w.proton.vault("ps2", "Work");
+    w.op.vault("ov2", "Proton · Work");
+    let id = w.proton.add("ps1", login("Site", "alice", "pw1"));
+    w.sync();
+    // Moved in Proton into a vault the next sign-in cannot see.
+    w.proton.move_by_owner("ps1", &id, "ps2");
+    w.proton.vaults.retain(|v| v.id != "ps2");
+    let report = w.sync();
+    assert!(
+        !has(&report, |e| matches!(e, Event::ArchivedInOp { .. })),
+        "{report}"
+    );
+    assert_eq!(w.op.in_vault("ov1").len(), 1);
+}
+
+#[test]
+fn the_vault_lists_say_which_vaults_sync() {
+    let mut config = Config::default();
+    assert!(config.syncs("Personal"));
+    config.include_vaults = vec!["Work".into()];
+    assert!(!config.syncs("Personal") && config.syncs("Work"));
+    config.exclude_vaults = vec!["Work".into()];
+    assert!(!config.syncs("Work"));
+}

@@ -27,7 +27,9 @@ const TIMEOUT: Duration = Duration::from_secs(180);
 
 pub struct Proton {
     pub program: PathBuf,
-    pub session_dir: PathBuf,
+    /// pq-sync's own pass-cli session; `None`: the owner's own login, as
+    /// `pass-cli login` left it.
+    pub session_dir: Option<PathBuf>,
     /// `http://host:port`, for `HTTPS_PROXY`/`HTTP_PROXY`.
     pub proxy: Option<String>,
     /// The personal access token, to log the session in when needed.
@@ -41,13 +43,12 @@ impl Proton {
             .env("PASS_LOG_LEVEL", "off")
             .env("PROTON_PASS_NO_UPDATE_CHECK", "1")
             .env("PROTON_PASS_DISABLE_TELEMETRY", "1")
-            .env(
-                "PROTON_PASS_SESSION_DIR",
-                self.session_dir.display().to_string(),
-            )
             // Only `login` gets the token, and nothing of 1Password's
             // (its service account token above all) reaches pass-cli.
             .env_remove("PROTON_PASS_PERSONAL_ACCESS_TOKEN")
+            // The session is ours, or pass-cli's default one: never one an
+            // inherited variable picks.
+            .env_remove("PROTON_PASS_SESSION_DIR")
             .env_remove_prefix("OP_")
             // pass-cli reads the lowercase forms too; only ours apply.
             .env_remove("https_proxy")
@@ -58,6 +59,9 @@ impl Proton {
             command = command
                 .env("HTTPS_PROXY", proxy.as_str())
                 .env("HTTP_PROXY", proxy.as_str());
+        }
+        if let Some(dir) = &self.session_dir {
+            command = command.env("PROTON_PASS_SESSION_DIR", dir.display().to_string());
         }
         command
     }
@@ -81,6 +85,9 @@ impl Proton {
         match SessionProblem::from_stderr(&stderr) {
             Some(SessionProblem::NotLoggedIn | SessionProblem::Invalidated) => {}
             _ => return Err(failure("pass-cli info", &info.stderr)),
+        }
+        if self.session_dir.is_none() {
+            bail!("your pass-cli is not logged in: run `pass-cli login`, then try again");
         }
         let Some(token) = &self.token else {
             bail!(
@@ -297,7 +304,7 @@ mod tests {
     fn proton(fake: &FakeCli, token: Option<&str>) -> Proton {
         Proton {
             program: fake.program(),
-            session_dir: fake.dir().join("session"),
+            session_dir: Some(fake.dir().join("session")),
             proxy: Some("http://100.94.76.106:8888".to_string()),
             token: token.map(SecretString::new),
         }
@@ -407,6 +414,32 @@ mod tests {
         fake.fail("info---output", "not logged in");
         let err = proton(&fake, None).ensure_session().unwrap_err();
         assert!(err.to_string().contains("pq-sync setup"), "{err}");
+    }
+
+    #[test]
+    fn the_owners_own_login_is_used_as_it_is() {
+        let fake = FakeCli::new();
+        fake.respond(
+            "vault-list",
+            r#"{"vaults":[{"name":"Personal","vault_id":"v","share_id":"s1"}]}"#,
+        );
+        let mut owners = proton(&fake, None);
+        owners.session_dir = None;
+        // pass-cli's own default session, whatever the environment says.
+        assert!(owners.command().removes("PROTON_PASS_SESSION_DIR"));
+        owners.vaults().unwrap();
+        assert!(env_has(
+            &fake.calls()[0].env,
+            "PROTON_PASS_SESSION_DIR=<unset>"
+        ));
+
+        let fake = FakeCli::new();
+        fake.fail("info---output", "not logged in");
+        let mut owners = proton(&fake, None);
+        owners.session_dir = None;
+        let err = owners.ensure_session().unwrap_err();
+        assert!(err.to_string().contains("pass-cli login"), "{err}");
+        assert_eq!(fake.calls().len(), 1, "no login is tried");
     }
 
     #[test]

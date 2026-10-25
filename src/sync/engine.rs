@@ -69,6 +69,15 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// Whether the Proton vault `name` is synced: included (or no list),
+    /// and not excluded.
+    pub fn syncs(&self, name: &str) -> bool {
+        (self.include_vaults.is_empty() || self.include_vaults.iter().any(|v| v == name))
+            && !self.exclude_vaults.iter().any(|v| v == name)
+    }
+}
+
 /// The Proton item a 1Password copy points back to: `share_id/item_id`.
 pub fn proton_ref(share: &str, item: &str) -> String {
     format!("{share}/{item}")
@@ -317,15 +326,26 @@ impl Engine<'_> {
     // ---- vaults -----------------------------------------------------------
 
     fn pair_vaults(&mut self) -> Result<Vec<VaultRun>> {
-        let proton_vaults: Vec<Vault> = self
-            .proton
-            .vaults()?
+        let all_proton = self.proton.vaults()?;
+        // A paired vault this sign-in cannot see (not one the config leaves
+        // out) may hold an item that moved there: nothing gone from Proton
+        // is deleted this run.
+        if self
+            .state
+            .vaults
+            .iter()
+            .any(|pair| !all_proton.iter().any(|v| v.id == pair.proton_share))
+        {
+            self.proton_unread = true;
+            self.report.push(Event::Vault(
+                "a paired Proton vault is out of reach (deleted, or no longer shared with this \
+                 sign-in): nothing gone from Proton is deleted in 1Password while it is"
+                    .to_string(),
+            ));
+        }
+        let proton_vaults: Vec<Vault> = all_proton
             .into_iter()
-            .filter(|vault| {
-                (self.config.include_vaults.is_empty()
-                    || self.config.include_vaults.contains(&vault.name))
-                    && !self.config.exclude_vaults.contains(&vault.name)
-            })
+            .filter(|vault| self.config.syncs(&vault.name))
             .collect();
         if !self.op_allows(op_requests::VAULT_LIST, false) {
             return Ok(Vec::new());
@@ -338,21 +358,52 @@ impl Engine<'_> {
             }
         };
 
+        // A name more than one Proton vault has (someone's shared vault
+        // named like one of the owner's) cannot say which to pair.
+        let mut named: BTreeMap<&str, usize> = BTreeMap::new();
+        for vault in &proton_vaults {
+            *named.entry(vault.name.as_str()).or_default() += 1;
+        }
+        let mut shared_names: BTreeMap<String, usize> = named
+            .into_iter()
+            .filter(|(_, count)| *count > 1)
+            .map(|(name, count)| (name.to_string(), count))
+            .collect();
+
         let mut runs = Vec::new();
         for proton_vault in proton_vaults {
             let paired = self
                 .state
                 .vault_for_proton(&proton_vault.id)
                 .map(|pair| pair.op_vault.clone());
+            if paired.is_none() && shared_names.contains_key(&proton_vault.name) {
+                // Reported once per name.
+                let Some(count) = shared_names.insert(proton_vault.name.clone(), 0) else {
+                    continue;
+                };
+                if count == 0 {
+                    continue;
+                }
+                self.report.push(Event::Vault(format!(
+                    "{count} Proton vaults are named '{}', so none of them is paired by name: \
+                     rename all but one",
+                    crate::text::printable(&proton_vault.name)
+                )));
+                continue;
+            }
             let op_vault = match paired {
                 Some(id) => match op_vaults.iter().find(|vault| vault.id == id) {
                     Some(vault) => vault.clone(),
                     None => {
                         self.report.push(Event::Vault(format!(
-                            "the 1Password vault paired with '{}' is gone, or the service account \
-                             can no longer reach it; skipped",
+                            "the 1Password vault paired with '{}' is gone, or this sign-in \
+                             cannot reach it: skipped, and nothing gone from 1Password is \
+                             trashed in Proton while it is",
                             crate::text::printable(&proton_vault.name)
                         )));
+                        // An item may have moved there: nothing gone from
+                        // 1Password is deleted this run.
+                        self.op_unread = true;
                         continue;
                     }
                 },
@@ -429,6 +480,14 @@ impl Engine<'_> {
                         return Ok(None);
                     }
                 }
+            }
+            None if self.config.create_op_vaults => {
+                self.report.push(Event::Vault(format!(
+                    "would create '{}' in 1Password for Proton's '{}'",
+                    crate::text::printable(&name),
+                    crate::text::printable(&proton.name)
+                )));
+                return Ok(None);
             }
             None => {
                 self.report.push(Event::Vault(format!(
