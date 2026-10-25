@@ -27,7 +27,7 @@ use super::proton_json::{IDENTITY_FIELDS, identity_field_kind};
 use super::record::{
     CUSTOM_PREFIX, FieldKind, Kind, Record, normalize_card_number, normalize_expiry,
 };
-use super::secret::SecretString;
+use super::secret::{SecretString, parse_json};
 
 /// pq-sync's section for fields 1Password has no built-in slot for.
 pub const SECTION_ID: &str = "pq-sync";
@@ -496,8 +496,7 @@ fn bind(raw: &Value, kind: Kind, slots: &[Slot]) -> Result<(Record, Binding, Opt
 /// Parse `op item get --format json`. `Ok(None)` for categories pq-sync does
 /// not carry.
 pub fn parse_item(json: &str) -> Result<Option<OpItem>> {
-    // serde_json's errors quote no input, only positions.
-    let root: Value = serde_json::from_str(json).context("op item output is not JSON")?;
+    let root: Value = parse_json(json, "op item output")?;
     let category = root
         .get("category")
         .and_then(Value::as_str)

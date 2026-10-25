@@ -98,8 +98,9 @@ fn is_private(meta: &fs::Metadata) -> bool {
 
 /// Replace `path` with `contents`. They go to a new 0600 file beside it,
 /// which is then renamed over it: a reader never sees a partial file, and a
-/// link planted at the path is replaced, not followed. `noun` names the
-/// file in messages ("cache").
+/// link planted at the path is replaced, not followed. The directory is
+/// synced after the rename, so the new file survives a crash. `noun` names
+/// the file in messages ("cache").
 pub fn write_private(path: &Path, contents: &str, noun: &str) -> Result<()> {
     let failed = || format!("Failed to write {noun} file");
     let dir = path
@@ -118,7 +119,15 @@ pub fn write_private(path: &Path, contents: &str, noun: &str) -> Result<()> {
         // Only ever the file this run created.
         let _ = fs::remove_file(&temp);
     }
-    written.with_context(failed)
+    written.with_context(failed)?;
+    // The rename is a change to the directory: sync it too, so a crash
+    // cannot bring back the previous file after this one was reported
+    // written.
+    #[cfg(unix)]
+    fs::File::open(dir)
+        .and_then(|dir| dir.sync_all())
+        .with_context(|| format!("Failed to sync the {noun} directory"))?;
+    Ok(())
 }
 
 /// Writes by this process, numbering its temporary files.
