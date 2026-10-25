@@ -369,6 +369,16 @@ fn bind(raw: &Value, kind: Kind, slots: &[Slot]) -> Result<(Record, Binding, Opt
             binding.ambiguous = true;
             continue;
         }
+        // A field pq-sync writes to holding something it cannot read (not
+        // text): an edit would overwrite what the read never showed.
+        if reserved
+            && field
+                .get("value")
+                .is_some_and(|v| !v.is_null() && !v.is_string())
+        {
+            binding.ambiguous = true;
+            continue;
+        }
         // Values that are not text (an address) stay in the raw item only.
         let value = field.get("value").and_then(Value::as_str);
         if id == REF_FIELD_ID && in_own_section(field) {
@@ -537,6 +547,15 @@ enum Change {
 pub fn apply_edit(raw: &mut RawItem, record: &Record, keys: &BTreeSet<String>) -> Result<()> {
     if !raw.0.is_object() {
         raw.0 = json!({});
+    }
+    // The fields a key binds to depend on the category: a record of
+    // another kind would write where a read of this item never looked.
+    let category = raw.0.get("category").and_then(Value::as_str).unwrap_or("");
+    if kind_of_category(category) != Some(record.kind) {
+        bail!(
+            "the 1Password item is not a {}; pq-sync will not edit it",
+            record.kind.as_str()
+        );
     }
     let slots = slots(record.kind);
     let (_, binding, _) = bind(&raw.0, record.kind, &slots)?;
@@ -1342,5 +1361,42 @@ mod tests {
                 .urls(),
             ["https://b.example", "https://c.example"]
         );
+    }
+
+    #[test]
+    fn a_reserved_field_with_a_value_the_read_cannot_show_makes_an_item_ambiguous() {
+        let raw = RawItem(
+            json!({ "id": "c", "title": "C", "category": "CREDIT_CARD", "version": 1,
+            "fields": [
+                { "id": "expiry", "type": "MONTH_YEAR", "label": "expiry date", "value": "2027/12" },
+                { "id": EXPIRY_TEXT_ID, "type": "STRING", "label": "expiry date",
+                  "section": { "id": SECTION_ID }, "value": { "secret": "ONLY-IN-RAW" } }
+            ] }),
+        );
+        let item = parse_item(&raw.0.to_string()).unwrap().unwrap();
+        assert!(item.ambiguous);
+        let keys: BTreeSet<String> = ["expiration_date".to_string()].into();
+        let mut raw = raw;
+        assert!(apply_edit(&mut raw, &item.record, &keys).is_err());
+        assert_eq!(raw.0["fields"][1]["value"]["secret"], "ONLY-IN-RAW");
+
+        // An address in a non-slot field is fine: it is not pq-sync's.
+        let raw = json!({ "id": "i", "title": "I", "category": "IDENTITY", "version": 1,
+            "fields": [{ "id": "address", "type": "ADDRESS", "label": "address",
+                         "section": { "id": "address" }, "value": { "street": "1 Main" } }] });
+        assert!(!parse_item(&raw.to_string()).unwrap().unwrap().ambiguous);
+    }
+
+    #[test]
+    fn an_edit_of_another_category_is_refused() {
+        let mut raw = RawItem(
+            json!({ "id": "n", "title": "N", "category": "SECURE_NOTE", "version": 1,
+            "fields": [{ "id": "password", "type": "STRING", "label": "Other", "value": "OLD" }] }),
+        );
+        let mut login = Record::new(Kind::Login);
+        login.set("password", "NEW-SECRET", FieldKind::Concealed);
+        let keys: BTreeSet<String> = ["password".to_string()].into();
+        assert!(apply_edit(&mut raw, &login, &keys).is_err());
+        assert_eq!(raw.0["fields"][0]["value"], "OLD");
     }
 }
