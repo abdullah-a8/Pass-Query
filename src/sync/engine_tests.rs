@@ -658,3 +658,116 @@ fn each_run_counts_only_its_own_requests() {
         w.op.requests() - made
     );
 }
+
+#[test]
+fn an_item_paired_without_a_record_of_its_copy_is_guarded() {
+    let mut w = World::new();
+    let id = w.proton.add("ps1", login("Site", "alice", "pw1"));
+    w.sync();
+    // The state is lost: the reference alone does not prove the copy is
+    // pq-sync's, and it may have gained a passkey since.
+    w.state = State::new(KEY);
+    w.sync();
+    assert!(w.state.items[0].op_guarded);
+    w.proton.edit("ps1", &id, |r| {
+        r.set("password", "pw2", FieldKind::Concealed)
+    });
+    let writes = w.op.writes.len();
+    let report = w.sync();
+    assert!(
+        has(&report, |e| matches!(e, Event::Blocked { .. })),
+        "{report}"
+    );
+    assert_eq!(w.op.writes.len(), writes);
+}
+
+#[test]
+fn a_proton_move_does_not_hide_a_passkey_added_before_it() {
+    let mut w = World::new();
+    w.proton.vault("ps2", "Work");
+    w.op.vault("ov2", "Proton · Work");
+    let id = w.proton.add("ps1", login("Site", "alice", "pw1"));
+    w.sync();
+    let op_id = w.op_item_of(&id);
+    w.op.add_passkey("ov1", &op_id);
+    let moved = w.proton.move_by_owner("ps1", &id, "ps2");
+    let report = w.sync();
+    assert!(
+        has(&report, |e| matches!(e, Event::Guarded { .. })),
+        "{report}"
+    );
+    w.proton.edit("ps2", &moved, |r| {
+        r.set("password", "pw2", FieldKind::Concealed)
+    });
+    let writes = w.op.writes.len();
+    w.sync();
+    assert_eq!(w.op.writes.len(), writes);
+}
+
+#[test]
+fn a_1password_move_does_not_hide_a_passkey_added_before_it() {
+    let mut w = World::new();
+    w.proton.vault("ps2", "Work");
+    w.op.vault("ov2", "Proton · Work");
+    let id = w.proton.add("ps1", login("Site", "alice", "pw1"));
+    w.sync();
+    let op_id = w.op_item_of(&id);
+    w.op.add_passkey("ov1", &op_id);
+    w.op.move_item(&op_id, "ov1", "ov2").unwrap();
+    let report = w.sync();
+    assert!(
+        has(&report, |e| matches!(e, Event::Moved { .. })),
+        "{report}"
+    );
+    assert!(
+        has(&report, |e| matches!(e, Event::Guarded { .. })),
+        "{report}"
+    );
+    assert!(w.state.items[0].op_guarded);
+}
+
+#[test]
+fn an_item_with_less_than_a_1password_item_is_not_paired_with_it() {
+    let mut w = World::new();
+    let mut bare = Record::new(Kind::Login);
+    bare.set("title", "Bank", FieldKind::Text);
+    w.proton.add("ps1", bare);
+    w.op.add_native("ov1", &login("Bank", "me", "secret"));
+    let report = w.sync();
+    assert!(
+        !has(&report, |e| matches!(e, Event::Paired { .. })),
+        "{report}"
+    );
+}
+
+#[test]
+fn the_brake_holds_just_over_a_tenth() {
+    let mut w = World::new();
+    let ids: Vec<String> = (0..31)
+        .map(|n| w.proton.add("ps1", login(&format!("Item {n}"), "u", "p")))
+        .collect();
+    w.sync();
+    w.sync();
+    for id in &ids[..4] {
+        w.proton.trash_item("ps1", id);
+    }
+    let report = w.sync();
+    assert!(
+        has(&report, |e| matches!(
+            e,
+            Event::BrakeHeld { vanished: 4, .. }
+        )),
+        "{report}"
+    );
+}
+
+#[test]
+fn creating_a_vault_counts_as_a_write() {
+    let mut w = World::new();
+    w.config.create_op_vaults = true;
+    w.config.op_writes_per_run = 1;
+    w.proton.vault("ps2", "Work");
+    w.proton.vault("ps3", "Home");
+    w.sync();
+    assert_eq!(w.op.vaults.len(), 2);
+}

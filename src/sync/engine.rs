@@ -414,7 +414,10 @@ impl Engine<'_> {
                     return Ok(None);
                 }
                 match self.op.create_vault(&name) {
-                    Ok(vault) => vault,
+                    Ok(vault) => {
+                        self.op_writes += 1;
+                        vault
+                    }
                     Err(e) => {
                         self.op_failed(e, &name)?;
                         return Ok(None);
@@ -622,13 +625,25 @@ impl Engine<'_> {
                     if !self.op_allows(op_requests::ITEM_MOVE, true) {
                         continue;
                     }
+                    // The move forgets the version: a change pq-sync did not
+                    // make must be caught now (see `read_pair_op`).
+                    let listed = Self::run_of(runs, &pair)
+                        .and_then(|run| run.op_items.get(&pair.op_item))
+                        .map(|item| item.version);
+                    let foreign_change = pair.op_version != 0 && listed != Some(pair.op_version);
                     match self
                         .op
                         .move_item(&pair.op_item, &pair.op_vault, &target.op.id)
                     {
                         Ok(new_id) => {
                             self.op_writes += 1;
+                            if foreign_change && !pair.op_guarded {
+                                self.report.push(Event::Guarded {
+                                    title: title.clone(),
+                                });
+                            }
                             let pair = &mut self.state.items[index];
+                            pair.op_guarded |= foreign_change;
                             pair.proton_share = target.proton.id.clone();
                             pair.proton_item = id.clone();
                             pair.op_vault = target.op.id.clone();
@@ -662,10 +677,16 @@ impl Engine<'_> {
                     });
                     let Some(position) = found else { continue };
                     let (run, id) = unpaired_op.remove(position);
-                    op_items.remove(&(run, id.clone()));
+                    let item = op_items.remove(&(run, id.clone()));
                     moved.insert(index);
                     let target = &runs[run];
                     let title = target.op_items[&id].title.clone();
+                    // Moved by the owner: unless it is just as pq-sync left
+                    // it, it may have gained a passkey on the way.
+                    let version = target.op_items[&id].version;
+                    let unsafe_now = item.is_none_or(|item| item.has_files || item.ambiguous)
+                        || pair.op_version == 0
+                        || version != pair.op_version;
                     if self.config.dry_run {
                         self.report.push(Event::Moved {
                             title,
@@ -679,12 +700,18 @@ impl Engine<'_> {
                         &target.proton.id,
                     ) {
                         Ok(new_id) => {
+                            if unsafe_now && !pair.op_guarded {
+                                self.report.push(Event::Guarded {
+                                    title: title.clone(),
+                                });
+                            }
                             let pair = &mut self.state.items[index];
+                            pair.op_guarded |= unsafe_now;
                             pair.proton_share = target.proton.id.clone();
                             pair.proton_item = new_id;
                             pair.op_vault = target.op.id.clone();
                             pair.op_item = id.clone();
-                            pair.op_version = target.op_items[&id].version;
+                            pair.op_version = version;
                             pair.proton_modified = String::new();
                             self.report.push(Event::Moved {
                                 title,
@@ -702,9 +729,9 @@ impl Engine<'_> {
     }
 
     /// Pair unpaired items that are already the same item on both sides:
-    /// a 1Password copy pointing back to the Proton item (a copy made by a
-    /// run that ended before saving), or one holding everything the Proton
-    /// item holds.
+    /// a 1Password copy pq-sync asked for and never saw made, or one with
+    /// the Proton item's content (a reference back to it picks among
+    /// several). Only the first may be edited from a template later.
     fn pair_existing(
         &mut self,
         runs: &[VaultRun],
@@ -727,14 +754,25 @@ impl Engine<'_> {
                     .position(|(r, id)| *r == run && proton_ref(share, id) == reference)
             });
             let op_hashes = op_item.record.field_hashes(self.key);
+            // The same item: every field equal, but for those a Proton copy
+            // could not have received.
+            let uncopyable: BTreeSet<String> = proton_json::create_template(&op_item.record)
+                .missing
+                .into_iter()
+                .collect();
             let content_matches = |id: &String| {
                 proton_items.get(&(run, id.clone())).is_some_and(|item| {
+                    let proton_hashes = item.record.field_hashes(self.key);
+                    let names: BTreeSet<&String> =
+                        proton_hashes.keys().chain(op_hashes.keys()).collect();
                     item.record.kind == op_item.record.kind
-                        && item
-                            .record
-                            .field_hashes(self.key)
-                            .iter()
-                            .all(|(name, hash)| op_hashes.get(name) == Some(hash))
+                        && names.into_iter().all(|name| {
+                            match (proton_hashes.get(name), op_hashes.get(name)) {
+                                (Some(p), Some(o)) => p == o,
+                                (None, Some(_)) => uncopyable.contains(name),
+                                _ => false,
+                            }
+                        })
                 })
             };
             // A copy pq-sync asked for and never saw made: its reference
@@ -754,17 +792,9 @@ impl Engine<'_> {
                 asked_for(id) || content_matches(id)
             });
             let by_content = || {
-                unpaired_proton.iter().position(|(r, id)| {
-                    *r == run
-                        && proton_items.get(&(*r, id.clone())).is_some_and(|item| {
-                            item.record.kind == op_item.record.kind
-                                && item
-                                    .record
-                                    .field_hashes(self.key)
-                                    .iter()
-                                    .all(|(name, hash)| op_hashes.get(name) == Some(hash))
-                        })
-                })
+                unpaired_proton
+                    .iter()
+                    .position(|(r, id)| *r == run && content_matches(id))
             };
             let Some(position) = by_ref.or_else(by_content) else {
                 index += 1;
@@ -781,7 +811,10 @@ impl Engine<'_> {
                 continue;
             }
             if ours_lost && let Some(proton) = proton_items.get(&(run, proton_id.clone())) {
-                let pair = self.copied_pair(&runs[run], &proton_id, &proton.record, op_item);
+                let mut pair = self.copied_pair(&runs[run], &proton_id, &proton.record, op_item);
+                // Its reply was lost: a version past the first is a change
+                // pq-sync did not see.
+                pair.op_guarded |= version_of(&op_item.raw) > 1;
                 self.state
                     .pending
                     .retain(|p| !(p.proton_share == *share && p.proton_item == proton_id));
@@ -808,10 +841,9 @@ impl Engine<'_> {
                 &proton_hashes,
                 &op_hashes,
             );
-            let ours = op_item.proton_ref.is_some();
             self.state.items.push(ItemPair {
                 kind: op_item.record.kind,
-                origin: if ours {
+                origin: if op_item.proton_ref.is_some() {
                     Origin::Proton
                 } else {
                     Origin::OnePassword
@@ -824,9 +856,10 @@ impl Engine<'_> {
                 op_version: runs[run].op_items[&op_id].version,
                 base,
                 proton_missing,
-                // An item pq-sync did not create may hold a passkey the CLI
-                // cannot show.
-                op_guarded: op_item.has_files || op_item.ambiguous || !ours,
+                // Nothing shows pq-sync made it as it is now (a reference is
+                // item content anyone could set): it may hold a passkey the
+                // CLI cannot show.
+                op_guarded: true,
                 reported: BTreeMap::new(),
                 equivalents,
             });
@@ -1294,11 +1327,10 @@ impl Engine<'_> {
             if vanished.is_empty() {
                 continue;
             }
-            let threshold = self
-                .config
-                .delete_brake_min
-                .max((self.config.delete_brake_ratio * in_run.len() as f64).ceil() as usize);
-            if vanished.len() > threshold && !self.config.allow_mass_delete {
+            let count = vanished.len();
+            let too_many = count > self.config.delete_brake_min
+                && count as f64 > self.config.delete_brake_ratio * in_run.len() as f64;
+            if too_many && !self.config.allow_mass_delete {
                 self.report.push(Event::BrakeHeld {
                     vault: run.proton.name.clone(),
                     vanished: vanished.len(),
