@@ -216,6 +216,9 @@ pub struct MemoryOp {
     pub signed_out_at: Option<usize>,
     /// Make each create, but answer as if it timed out.
     pub lose_create_reply: bool,
+    /// Change this item (a passkey, say) just before a read of it: after
+    /// the listing, before the get.
+    pub change_on_get: Option<String>,
 }
 
 impl MemoryOp {
@@ -345,6 +348,9 @@ impl OpApi for MemoryOp {
     fn get(&mut self, vault: &str, item: &str) -> Result<Option<OpItem>> {
         self.count(1)?;
         self.gets += 1;
+        if self.change_on_get.as_deref() == Some(item) {
+            self.add_passkey(vault, item);
+        }
         Ok(self
             .items
             .get(&(vault.to_string(), item.to_string()))

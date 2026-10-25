@@ -878,3 +878,386 @@ fn the_vault_lists_say_which_vaults_sync() {
     config.exclude_vaults = vec!["Work".into()];
     assert!(!config.syncs("Work"));
 }
+
+/// A Proton login as Proton keeps an address typed as "email or username":
+/// in its email field, the username empty.
+fn email_login(title: &str, email: &str, password: &str) -> Record {
+    let mut r = Record::new(Kind::Login);
+    r.set("title", title, FieldKind::Text);
+    r.set("email", email, FieldKind::Text);
+    r.set("password", password, FieldKind::Concealed);
+    r
+}
+
+/// The value of 1Password field `id` of the only item in "ov1", if any.
+fn op_field(w: &World, id: &str) -> Option<String> {
+    let ids = w.op_ids();
+    let raw = &w.op.items[&("ov1".to_string(), ids[0].clone())];
+    raw["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == id)
+        .map(|f| f["value"].as_str().unwrap_or("").to_string())
+}
+
+#[test]
+fn a_proton_login_by_email_has_the_email_as_its_1password_username() {
+    let mut w = World::new();
+    w.proton
+        .add("ps1", email_login("Site", "me@example.com", "pw1"));
+    w.sync();
+    assert_eq!(op_field(&w, "username").as_deref(), Some("me@example.com"));
+    assert_eq!(op_field(&w, "pqsync-email"), None, "no second copy of it");
+    let report = w.sync();
+    assert!(report.events.is_empty(), "{report}");
+}
+
+#[test]
+fn a_proton_login_with_both_keeps_the_email_beside_the_username() {
+    let mut w = World::new();
+    let mut both = email_login("Site", "me@example.com", "pw1");
+    both.set("username", "alice", FieldKind::Text);
+    w.proton.add("ps1", both);
+    w.sync();
+    assert_eq!(op_field(&w, "username").as_deref(), Some("alice"));
+    assert_eq!(
+        op_field(&w, "pqsync-email").as_deref(),
+        Some("me@example.com")
+    );
+    let report = w.sync();
+    assert!(report.events.is_empty(), "{report}");
+}
+
+#[test]
+fn a_1password_login_by_email_reaches_proton_as_its_email() {
+    let mut w = World::new();
+    w.op.add_native("ov1", &{
+        let mut r = Record::new(Kind::Login);
+        r.set("title", "Site", FieldKind::Text);
+        r.set("username", "me@example.com", FieldKind::Text);
+        r.set("password", "pw1", FieldKind::Concealed);
+        r
+    });
+    w.sync();
+    let items = w.proton.active_in("ps1");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].1.record.value("email"), "me@example.com");
+    assert_eq!(items[0].1.record.value("username"), "");
+    let report = w.sync();
+    assert!(report.events.is_empty(), "{report}");
+}
+
+#[test]
+fn a_change_of_email_moves_with_it_into_the_username() {
+    let mut w = World::new();
+    let id = w
+        .proton
+        .add("ps1", email_login("Site", "me@example.com", "pw1"));
+    w.sync();
+    w.proton.edit("ps1", &id, |r| {
+        r.set("email", "new@example.com", FieldKind::Text)
+    });
+    w.sync();
+    assert_eq!(op_field(&w, "username").as_deref(), Some("new@example.com"));
+    assert_eq!(op_field(&w, "pqsync-email"), None);
+    let report = w.sync();
+    assert!(report.events.is_empty(), "{report}");
+}
+
+#[test]
+fn a_username_stays_the_sign_in_when_an_email_is_added() {
+    let mut w = World::new();
+    // Proton's username field holding an address, its email empty.
+    let id = w
+        .proton
+        .add("ps1", login("Site", "signin@example.com", "pw1"));
+    w.sync();
+    w.proton.edit("ps1", &id, |r| {
+        r.set("email", "contact@example.com", FieldKind::Text)
+    });
+    w.sync();
+    assert_eq!(
+        op_field(&w, "username").as_deref(),
+        Some("signin@example.com")
+    );
+    assert_eq!(
+        op_field(&w, "pqsync-email").as_deref(),
+        Some("contact@example.com")
+    );
+    let report = w.sync();
+    assert!(report.events.is_empty(), "{report}");
+}
+
+#[test]
+fn a_username_cleared_in_1password_is_reported() {
+    let mut w = World::new();
+    let id = w.proton.add("ps1", login("Site", "me@example.com", "pw1"));
+    w.sync();
+    let op_id = w.op_item_of(&id);
+    w.op.edit_by_owner("ov1", &op_id, |r| r.set("username", "", FieldKind::Text));
+    let report = w.sync();
+    assert!(
+        has(&report, |e| matches!(
+            e,
+            Event::OpOnlyChange { fields, .. } if fields == &["username".to_string()]
+        )),
+        "{report}"
+    );
+}
+
+/// Turn the pair of the only item into one an older pq-sync made of a
+/// Proton login by email: its 1Password item with an empty username and
+/// the email in pq-sync's section (the version as pq-sync left it), its
+/// base with the email, not a username, and no layout.
+fn make_legacy(w: &mut World, email: &str) {
+    let id = w.op_ids()[0].clone();
+    let raw = w.op.items.get_mut(&("ov1".to_string(), id)).unwrap();
+    let fields = raw["fields"].as_array_mut().unwrap();
+    for field in fields.iter_mut() {
+        if field["id"] == "username" {
+            field["value"] = "".into();
+        }
+    }
+    fields.push(serde_json::json!({
+        "id": "pqsync-email", "type": "EMAIL", "label": "email", "value": email,
+        "section": { "id": "pq-sync", "label": "Proton Pass" },
+    }));
+    let mut old = Record::new(Kind::Login);
+    old.set("email", email, FieldKind::Text);
+    let pair = &mut w.state.items[0];
+    pair.base.remove("username");
+    pair.base
+        .insert("email".to_string(), old.field_hashes(KEY)["email"].clone());
+    pair.equivalents.clear();
+    pair.op_layout = 0;
+}
+
+#[test]
+fn a_login_laid_out_before_is_laid_out_again_once() {
+    let mut w = World::new();
+    w.proton
+        .add("ps1", email_login("Site", "me@example.com", "pw1"));
+    w.sync();
+    make_legacy(&mut w, "me@example.com");
+
+    let report = w.sync();
+    assert!(
+        report
+            .events
+            .iter()
+            .all(|e| matches!(e, Event::UpdatedOp { .. }))
+            && !report.events.is_empty(),
+        "{report}"
+    );
+    assert_eq!(op_field(&w, "username").as_deref(), Some("me@example.com"));
+    assert_eq!(op_field(&w, "pqsync-email"), None);
+    assert!(w.proton.writes.is_empty(), "Proton is not touched");
+    let writes = w.op.writes.len();
+    let report = w.sync();
+    assert!(report.events.is_empty(), "{report}");
+    assert_eq!(w.op.writes.len(), writes);
+}
+
+#[test]
+fn a_dry_run_says_which_logins_it_would_lay_out_again() {
+    let mut w = World::new();
+    w.proton
+        .add("ps1", email_login("Site", "me@example.com", "pw1"));
+    w.sync();
+    make_legacy(&mut w, "me@example.com");
+    w.config.dry_run = true;
+    let writes = w.op.writes.len();
+    let report = w.sync();
+    assert!(
+        has(&report, |e| matches!(e, Event::UpdatedOp { .. })),
+        "{report}"
+    );
+    assert_eq!(w.op.writes.len(), writes);
+    assert_eq!(op_field(&w, "username").as_deref(), Some(""));
+}
+
+#[test]
+fn a_guarded_login_laid_out_before_is_reported_not_edited() {
+    let mut w = World::new();
+    w.proton
+        .add("ps1", email_login("Site", "me@example.com", "pw1"));
+    w.sync();
+    make_legacy(&mut w, "me@example.com");
+    w.state.items[0].op_guarded = true;
+    let writes = w.op.writes.len();
+    let report = w.sync();
+    assert!(
+        has(&report, |e| matches!(e, Event::Blocked { .. })),
+        "{report}"
+    );
+    assert_eq!(w.op.writes.len(), writes);
+    let report = w.sync();
+    assert!(report.events.is_empty(), "reported once: {report}");
+    assert_eq!(w.state.items[0].op_layout, 0, "read as before");
+}
+
+#[test]
+fn a_login_changed_after_the_listing_is_not_laid_out() {
+    let mut w = World::new();
+    w.proton
+        .add("ps1", email_login("Site", "me@example.com", "pw1"));
+    w.sync();
+    make_legacy(&mut w, "me@example.com");
+    // A passkey saved between the listing and the read.
+    w.op.change_on_get = Some(w.op_ids()[0].clone());
+    let writes = w.op.writes.len();
+    w.sync();
+    assert_eq!(w.op.writes.len(), writes, "not edited");
+    assert_eq!(op_field(&w, "username").as_deref(), Some(""));
+    w.op.change_on_get = None;
+    let report = w.sync();
+    assert!(
+        has(&report, |e| matches!(e, Event::Guarded { .. })),
+        "the merge sees the change and guards it: {report}"
+    );
+    assert_eq!(w.op.writes.len(), writes);
+}
+
+#[test]
+fn a_login_laid_out_before_merges_as_before_until_laid_out() {
+    let mut w = World::new();
+    let id = w
+        .proton
+        .add("ps1", email_login("Site", "me@example.com", "pw1"));
+    w.sync();
+    make_legacy(&mut w, "me@example.com");
+    w.proton.edit("ps1", &id, |r| {
+        r.set("password", "pw2", FieldKind::Concealed)
+    });
+    let report = w.sync();
+    assert!(
+        report.events.iter().all(
+            |e| matches!(e, Event::UpdatedOp { fields, .. } if fields == &["password".to_string()])
+        ),
+        "only the password, no false 1Password change: {report}"
+    );
+    assert_eq!(w.only_op_item().value("password"), "pw2");
+    // Next run, both sides as left: laid out.
+    let report = w.sync();
+    assert!(
+        has(&report, |e| matches!(e, Event::UpdatedOp { .. })),
+        "{report}"
+    );
+    assert_eq!(op_field(&w, "username").as_deref(), Some("me@example.com"));
+    let report = w.sync();
+    assert!(report.events.is_empty(), "{report}");
+}
+
+#[test]
+fn a_copy_laid_out_before_is_found_again_not_duplicated() {
+    let mut w = World::new();
+    w.proton
+        .add("ps1", email_login("Site", "me@example.com", "pw1"));
+    w.sync();
+    make_legacy(&mut w, "me@example.com");
+    // The state is lost: the old copy must be paired again, as it is.
+    w.state = State::new(KEY);
+    let report = w.sync();
+    assert!(
+        has(&report, |e| matches!(e, Event::Paired { .. })),
+        "{report}"
+    );
+    assert_eq!(w.op_ids().len(), 1, "no second copy in 1Password");
+    assert_eq!(w.proton.active_in("ps1").len(), 1, "none in Proton");
+    assert!(w.proton.writes.is_empty());
+    assert_eq!(w.state.items[0].op_layout, 0, "read as it was made");
+}
+
+#[test]
+fn a_lost_copy_laid_out_before_is_paired_at_its_layout() {
+    let mut w = World::new();
+    w.op.lose_create_reply = true;
+    w.proton
+        .add("ps1", email_login("Site", "me@example.com", "pw1"));
+    w.sync();
+    w.op.lose_create_reply = false;
+    // The copy whose reply was lost, as an older pq-sync made it.
+    let id = w.op_ids()[0].clone();
+    let raw = w.op.items.get_mut(&("ov1".to_string(), id)).unwrap();
+    let fields = raw["fields"].as_array_mut().unwrap();
+    for field in fields.iter_mut() {
+        if field["id"] == "username" {
+            field["value"] = "".into();
+        }
+    }
+    fields.push(serde_json::json!({
+        "id": "pqsync-email", "type": "EMAIL", "label": "email", "value": "me@example.com",
+        "section": { "id": "pq-sync", "label": "Proton Pass" },
+    }));
+    w.sync();
+    assert_eq!(w.state.items.len(), 1);
+    assert_eq!(w.state.items[0].op_layout, 0);
+    // The next run lays it out, as any older pair.
+    w.sync();
+    assert_eq!(op_field(&w, "username").as_deref(), Some("me@example.com"));
+    let report = w.sync();
+    assert!(report.events.is_empty(), "{report}");
+}
+
+#[test]
+fn a_guarded_login_laid_out_before_is_not_read_every_run() {
+    let mut w = World::new();
+    w.proton
+        .add("ps1", email_login("Site", "me@example.com", "pw1"));
+    w.sync();
+    make_legacy(&mut w, "me@example.com");
+    w.state.items[0].op_guarded = true;
+    w.sync();
+    let gets = w.op.gets;
+    w.sync();
+    w.sync();
+    assert_eq!(w.op.gets, gets, "nothing changed: nothing read");
+}
+
+#[test]
+fn a_guarded_login_the_owner_lays_out_by_hand_settles() {
+    let mut w = World::new();
+    w.proton
+        .add("ps1", email_login("Site", "me@example.com", "pw1"));
+    w.sync();
+    make_legacy(&mut w, "me@example.com");
+    w.state.items[0].op_guarded = true;
+    w.sync();
+    // As the report asks: the email moved into the username, in 1Password.
+    let op_id = w.op_ids()[0].clone();
+    w.op.edit_by_owner("ov1", &op_id, |r| {
+        r.set("username", "me@example.com", FieldKind::Text);
+        r.set("email", "", FieldKind::Text);
+    });
+    let report = w.sync();
+    assert!(report.events.is_empty(), "{report}");
+    assert_eq!(w.state.items[0].op_layout, 1);
+    let report = w.sync();
+    assert!(report.events.is_empty(), "{report}");
+}
+
+#[test]
+fn a_passkey_saved_after_a_move_is_still_caught() {
+    let mut w = World::new();
+    w.proton.vault("ps2", "Work");
+    w.op.vault("ov2", "Proton · Work");
+    let id = w.proton.add("ps1", login("Site", "alice", "pw1"));
+    w.sync();
+    let moved = w.proton.move_by_owner("ps1", &id, "ps2");
+    w.sync();
+    // A passkey saved in 1Password before the next run.
+    let op_id = w.op_item_of(&moved);
+    w.op.add_passkey("ov2", &op_id);
+    let report = w.sync();
+    assert!(
+        has(&report, |e| matches!(e, Event::Guarded { .. })),
+        "{report}"
+    );
+    w.proton.edit("ps2", &moved, |r| {
+        r.set("password", "pw2", FieldKind::Concealed)
+    });
+    let writes = w.op.writes.len();
+    w.sync();
+    assert_eq!(w.op.writes.len(), writes, "never edited");
+}

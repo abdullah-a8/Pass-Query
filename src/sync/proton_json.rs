@@ -11,7 +11,9 @@
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
-use super::record::{FieldKind, Kind, Record, normalize_card_number, normalize_expiry};
+use super::record::{
+    FieldKind, Kind, Record, looks_like_email, normalize_card_number, normalize_expiry,
+};
 use super::secret::SecretString;
 use crate::json::parse_json;
 
@@ -202,12 +204,17 @@ pub fn create_template(record: &Record) -> CreateTemplate {
     put(&mut template, "title", record.title());
     let subcommand = match record.kind {
         Kind::Login => {
-            for (key, name) in [
-                ("username", "username"),
-                ("email", "email"),
-                ("password", "password"),
-                ("totp", "totp_uri"),
-            ] {
+            // An address alone goes where Proton keeps one typed as "email
+            // or username": its email field. Read back, it is the sign-in
+            // again (`Record::with_signin_as_username`).
+            let (username, email) = match (record.value("username"), record.value("email")) {
+                (username, "") if looks_like_email(username) => ("", username),
+                both => both,
+            };
+            put(&mut template, "username", username);
+            put(&mut template, "email", email);
+            carried.extend(["username", "email"]);
+            for (key, name) in [("password", "password"), ("totp", "totp_uri")] {
                 put(&mut template, name, record.value(key));
                 carried.push(key);
             }
@@ -608,5 +615,29 @@ mod tests {
         let template = create_template(&card);
         assert_eq!(template_value(&template)["expiration_date"], "2100-01");
         assert!(template.missing.is_empty());
+    }
+
+    #[test]
+    fn an_address_alone_goes_in_protons_email_field() {
+        let template = |username: &str, email: &str| {
+            let mut r = Record::new(Kind::Login);
+            r.set("title", "Site", FieldKind::Text);
+            r.set("username", username, FieldKind::Text);
+            r.set("email", email, FieldKind::Text);
+            let json: Value = serde_json::from_str(create_template(&r).json.expose()).unwrap();
+            (
+                json["username"].as_str().unwrap_or("").to_string(),
+                json["email"].as_str().unwrap_or("").to_string(),
+            )
+        };
+        assert_eq!(
+            template("me@example.com", ""),
+            ("".into(), "me@example.com".into())
+        );
+        assert_eq!(template("alice", ""), ("alice".into(), "".into()));
+        assert_eq!(
+            template("a@example.com", "b@example.com"),
+            ("a@example.com".into(), "b@example.com".into())
+        );
     }
 }
