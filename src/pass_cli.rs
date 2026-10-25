@@ -22,7 +22,7 @@ pub enum SessionProblem {
 }
 
 impl SessionProblem {
-    fn from_stderr(stderr: &str) -> Option<Self> {
+    pub fn from_stderr(stderr: &str) -> Option<Self> {
         let s = stderr.to_lowercase();
         // An ended session wins: pass-cli can print a lock diagnostic early
         // (during startup telemetry) and then exit because the session was
@@ -109,14 +109,22 @@ impl std::error::Error for ItemUnavailable {}
 /// DeletedShare codes, a vault deleted between fetching the item and opening
 /// it, or a bare HTTP status when pass-cli printed only that (it does for
 /// item revisions).
-fn item_is_gone(stderr: &str) -> bool {
-    const MARKERS: [&str; 6] = [
+pub fn item_is_gone(stderr: &str) -> bool {
+    item_is_certainly_gone(stderr)
+        || ["Invalid status code: 403", "Invalid status code: 422"]
+            .iter()
+            .any(|marker| stderr.contains(marker))
+}
+
+/// Whether a failed item command says, beyond doubt, that the item or its
+/// vault is gone. A bare 403 or 422 does not: pq-sync, which would take the
+/// item for deleted, uses this one.
+pub fn item_is_certainly_gone(stderr: &str) -> bool {
+    const MARKERS: [&str; 4] = [
         "Reason: NotExists",
         "Reason: DeletedShare",
-        "Invalid status code: 403",
         "Invalid status code: 404",
         "Invalid status code: 410",
-        "Invalid status code: 422",
     ];
     MARKERS.iter().any(|marker| stderr.contains(marker))
         || stderr
@@ -139,7 +147,7 @@ fn pass_cli_command() -> Command {
 
 /// The error for a failed pass-cli call: its session problem when stderr
 /// shows one, otherwise `what` with a summary of pass-cli's message.
-fn failure(what: &str, stderr: &[u8]) -> anyhow::Error {
+pub fn failure(what: &str, stderr: &[u8]) -> anyhow::Error {
     let stderr = String::from_utf8_lossy(stderr);
     match SessionProblem::from_stderr(&stderr) {
         Some(problem) => anyhow::Error::new(problem),
@@ -150,7 +158,7 @@ fn failure(what: &str, stderr: &[u8]) -> anyhow::Error {
 /// What pq shows of a failed call's stderr: pass-cli's top-level error
 /// message and the Proton error code, escaped and shortened. Never the raw
 /// text, which can hold log lines with tokens or response bodies.
-fn summarize(stderr: &str) -> String {
+pub fn summarize(stderr: &str) -> String {
     const MAX_CHARS: usize = 200;
     let message = stderr
         .lines()
@@ -485,6 +493,14 @@ mod tests {
             "Error: Invalid status code: 401 Unauthorized"
         ));
         assert!(!item_is_gone("Error: Error opening item"));
+
+        // A bare 403 or 422 may not mean the item is gone: pq searches again,
+        // pq-sync must not take it for a deletion.
+        for maybe in ["Invalid status code: 403", "Invalid status code: 422"] {
+            assert!(item_is_gone(maybe) && !item_is_certainly_gone(maybe));
+        }
+        assert!(item_is_certainly_gone("Reason: NotExists"));
+        assert!(item_is_certainly_gone("Invalid status code: 404"));
         assert!(!item_is_gone("Reason: NotAllowed"));
     }
 
