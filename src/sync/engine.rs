@@ -20,7 +20,7 @@ use super::merge::{self, MergeInput};
 use super::onepassword::OpProblem;
 use super::op_json::{self, OpItem, RawItem};
 use super::proton_json::{self, ProtonItem};
-use super::record::{FieldHash, Kind, Record};
+use super::record::{FieldHash, FieldKind, Kind, Record};
 use super::report::{Event, Report};
 use super::state::{Equivalent, ItemPair, OP_LAYOUT, Origin, PendingCopy, State, VaultPair};
 use crate::pass_cli::SessionProblem;
@@ -840,18 +840,22 @@ impl Engine<'_> {
                 .missing
                 .into_iter()
                 .collect();
+            // Read as now, or as an older pq-sync made its copies.
             let content_matches = |id: &String| {
                 proton_items.get(&(run, id.clone())).is_some_and(|item| {
-                    let proton_hashes = proton_view(&item.record, OP_LAYOUT).field_hashes(self.key);
-                    let names: BTreeSet<&String> =
-                        proton_hashes.keys().chain(op_hashes.keys()).collect();
                     item.record.kind == op_item.record.kind
-                        && names.into_iter().all(|name| {
-                            match (proton_hashes.get(name), op_hashes.get(name)) {
-                                (Some(p), Some(o)) => p == o,
-                                (None, Some(_)) => uncopyable.contains(name),
-                                _ => false,
-                            }
+                        && [0, OP_LAYOUT].into_iter().any(|layout| {
+                            let proton_hashes =
+                                proton_view(&item.record, layout).field_hashes(self.key);
+                            let names: BTreeSet<&String> =
+                                proton_hashes.keys().chain(op_hashes.keys()).collect();
+                            names.into_iter().all(|name| {
+                                match (proton_hashes.get(name), op_hashes.get(name)) {
+                                    (Some(p), Some(o)) => p == o,
+                                    (None, Some(_)) => uncopyable.contains(name),
+                                    _ => false,
+                                }
+                            })
                         })
                 })
             };
@@ -890,9 +894,15 @@ impl Engine<'_> {
             if self.config.dry_run {
                 continue;
             }
+            let layout = proton_items
+                .get(&(run, proton_id.clone()))
+                .map_or(OP_LAYOUT, |proton| {
+                    self.layout_of(&proton.record, &op_item.record)
+                });
             if ours_lost && let Some(proton) = proton_items.get(&(run, proton_id.clone())) {
-                let record = proton_view(&proton.record, OP_LAYOUT);
+                let record = proton_view(&proton.record, layout);
                 let mut pair = self.copied_pair(&runs[run], &proton_id, &record, op_item);
+                pair.op_layout = layout;
                 // Its reply was lost: a version past the first is a change
                 // pq-sync did not see.
                 pair.op_guarded |= version_of(&op_item.raw) > 1;
@@ -905,7 +915,7 @@ impl Engine<'_> {
             }
             let proton_hashes = proton_items
                 .get(&(run, proton_id.clone()))
-                .map(|item| proton_view(&item.record, OP_LAYOUT).field_hashes(self.key))
+                .map(|item| proton_view(&item.record, layout).field_hashes(self.key))
                 .unwrap_or_default();
             let mut base = proton_hashes.clone();
             let mut proton_missing = BTreeSet::new();
@@ -943,7 +953,7 @@ impl Engine<'_> {
                 op_guarded: true,
                 reported: BTreeMap::new(),
                 equivalents,
-                op_layout: OP_LAYOUT,
+                op_layout: layout,
             });
             self.persist()?;
         }
@@ -1004,6 +1014,27 @@ impl Engine<'_> {
             }
         }
         Ok(())
+    }
+
+    /// The layout an existing 1Password login was made with, judged against
+    /// its Proton item: an older pq-sync's copy matches only the old reading
+    /// of Proton's sign-in (layout 0); anything else is read as now.
+    fn layout_of(&self, proton: &Record, op: &Record) -> u32 {
+        let op_hashes = op.field_hashes(self.key);
+        let sign_in_matches = |view: &Record| {
+            let hashes = view.field_hashes(self.key);
+            ["username", "email"]
+                .iter()
+                .all(|key| hashes.get(*key) == op_hashes.get(*key))
+        };
+        if proton.kind == Kind::Login
+            && !sign_in_matches(&proton.with_signin_as_username())
+            && sign_in_matches(proton)
+        {
+            0
+        } else {
+            OP_LAYOUT
+        }
     }
 
     /// The pair for a Proton item and the 1Password copy pq-sync made of
@@ -1172,14 +1203,53 @@ impl Engine<'_> {
                 }
                 continue;
             }
+            let listed = run.op_items[&pair.op_item].version;
+            let proton_unchanged =
+                run.proton_items[&pair.proton_item].modified == pair.proton_modified;
+            if pair.op_guarded && pair.reported.contains_key("!layout") {
+                // Reported already: read again only once 1Password changed,
+                // to see whether the owner moved the email by hand.
+                if listed == pair.op_version || !proton_unchanged {
+                    continue;
+                }
+                let title = run.proton_items[&pair.proton_item].title.clone();
+                if !self.op_allows(op_requests::ITEM_GET, false) {
+                    break;
+                }
+                let item = match self.op.get(&pair.op_vault, &pair.op_item) {
+                    Ok(Some(item)) => item,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        self.op_failed(e, &title)?;
+                        continue;
+                    }
+                };
+                let username = item.record.value("username");
+                let mut as_email = Record::new(Kind::Login);
+                as_email.set("email", username, FieldKind::Text);
+                let laid_by_hand = item.record.value("email").is_empty()
+                    && !username.is_empty()
+                    && as_email.field_hashes(self.key).get("email") == pair.base.get("email");
+                if laid_by_hand && !self.config.dry_run {
+                    // Now read as pq-sync reads it today; the merge takes in
+                    // the rest of the change.
+                    let read = item.record.field_hashes(self.key);
+                    pair.base.remove("email");
+                    if let Some(hash) = read.get("username") {
+                        pair.base.insert("username".to_string(), hash.clone());
+                    }
+                    pair.reported.remove("!layout");
+                    pair.op_layout = OP_LAYOUT;
+                    self.state.items[index] = pair;
+                    unsaved = true;
+                }
+                continue;
+            }
             let pending = ["username", "email", "!username", "!email"]
                 .iter()
                 .any(|key| pair.reported.contains_key(*key))
                 || fields.iter().any(|key| pair.equivalents.contains_key(key));
-            if run.proton_items[&pair.proton_item].modified != pair.proton_modified
-                || run.op_items[&pair.op_item].version != pair.op_version
-                || pending
-            {
+            if !proton_unchanged || listed != pair.op_version || pending {
                 continue;
             }
             let title = run.proton_items[&pair.proton_item].title.clone();
@@ -1206,16 +1276,16 @@ impl Engine<'_> {
             if pair.op_guarded || item.has_files || item.ambiguous {
                 // It may hold what an edit would drop: it stays at its old
                 // layout, and the owner moves the email by hand.
-                if !pair.reported.contains_key("!layout") {
-                    self.report.push(Event::Blocked {
-                        title,
-                        fields: vec!["username".to_string()],
-                    });
-                    if !self.config.dry_run {
-                        pair.reported.insert("!layout".to_string(), String::new());
-                        self.state.items[index] = pair;
-                        unsaved = true;
-                    }
+                self.report.push(Event::Blocked {
+                    title,
+                    fields: vec!["username".to_string()],
+                });
+                if !self.config.dry_run {
+                    // Not read again until it changes.
+                    pair.op_guarded = true;
+                    pair.reported.insert("!layout".to_string(), String::new());
+                    self.state.items[index] = pair;
+                    unsaved = true;
                 }
                 continue;
             }
@@ -1419,6 +1489,10 @@ impl Engine<'_> {
             // (its own change, or one that lost a conflict it could not be
             // told of), so `op_side_of` stands for it when it is not read.
             let mut reported = BTreeMap::new();
+            // A login left at its old layout stays reported.
+            if let Some(marker) = pair.reported.get("!layout") {
+                reported.insert("!layout".to_string(), marker.clone());
+            }
             let fields: BTreeSet<&String> = op_hashes.keys().chain(plan.new_base.keys()).collect();
             for name in fields {
                 let in_op = op_hashes.get(name);

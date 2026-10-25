@@ -1148,3 +1148,91 @@ fn a_login_laid_out_before_merges_as_before_until_laid_out() {
     let report = w.sync();
     assert!(report.events.is_empty(), "{report}");
 }
+
+#[test]
+fn a_copy_laid_out_before_is_found_again_not_duplicated() {
+    let mut w = World::new();
+    w.proton
+        .add("ps1", email_login("Site", "me@example.com", "pw1"));
+    w.sync();
+    make_legacy(&mut w, "me@example.com");
+    // The state is lost: the old copy must be paired again, as it is.
+    w.state = State::new(KEY);
+    let report = w.sync();
+    assert!(
+        has(&report, |e| matches!(e, Event::Paired { .. })),
+        "{report}"
+    );
+    assert_eq!(w.op_ids().len(), 1, "no second copy in 1Password");
+    assert_eq!(w.proton.active_in("ps1").len(), 1, "none in Proton");
+    assert!(w.proton.writes.is_empty());
+    assert_eq!(w.state.items[0].op_layout, 0, "read as it was made");
+}
+
+#[test]
+fn a_lost_copy_laid_out_before_is_paired_at_its_layout() {
+    let mut w = World::new();
+    w.op.lose_create_reply = true;
+    w.proton
+        .add("ps1", email_login("Site", "me@example.com", "pw1"));
+    w.sync();
+    w.op.lose_create_reply = false;
+    // The copy whose reply was lost, as an older pq-sync made it.
+    let id = w.op_ids()[0].clone();
+    let raw = w.op.items.get_mut(&("ov1".to_string(), id)).unwrap();
+    let fields = raw["fields"].as_array_mut().unwrap();
+    for field in fields.iter_mut() {
+        if field["id"] == "username" {
+            field["value"] = "".into();
+        }
+    }
+    fields.push(serde_json::json!({
+        "id": "pqsync-email", "type": "EMAIL", "label": "email", "value": "me@example.com",
+        "section": { "id": "pq-sync", "label": "Proton Pass" },
+    }));
+    w.sync();
+    assert_eq!(w.state.items.len(), 1);
+    assert_eq!(w.state.items[0].op_layout, 0);
+    // The next run lays it out, as any older pair.
+    w.sync();
+    assert_eq!(op_field(&w, "username").as_deref(), Some("me@example.com"));
+    let report = w.sync();
+    assert!(report.events.is_empty(), "{report}");
+}
+
+#[test]
+fn a_guarded_login_laid_out_before_is_not_read_every_run() {
+    let mut w = World::new();
+    w.proton
+        .add("ps1", email_login("Site", "me@example.com", "pw1"));
+    w.sync();
+    make_legacy(&mut w, "me@example.com");
+    w.state.items[0].op_guarded = true;
+    w.sync();
+    let gets = w.op.gets;
+    w.sync();
+    w.sync();
+    assert_eq!(w.op.gets, gets, "nothing changed: nothing read");
+}
+
+#[test]
+fn a_guarded_login_the_owner_lays_out_by_hand_settles() {
+    let mut w = World::new();
+    w.proton
+        .add("ps1", email_login("Site", "me@example.com", "pw1"));
+    w.sync();
+    make_legacy(&mut w, "me@example.com");
+    w.state.items[0].op_guarded = true;
+    w.sync();
+    // As the report asks: the email moved into the username, in 1Password.
+    let op_id = w.op_ids()[0].clone();
+    w.op.edit_by_owner("ov1", &op_id, |r| {
+        r.set("username", "me@example.com", FieldKind::Text);
+        r.set("email", "", FieldKind::Text);
+    });
+    let report = w.sync();
+    assert!(report.events.is_empty(), "{report}");
+    assert_eq!(w.state.items[0].op_layout, 1);
+    let report = w.sync();
+    assert!(report.events.is_empty(), "{report}");
+}
