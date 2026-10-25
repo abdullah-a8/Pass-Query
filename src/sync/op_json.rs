@@ -425,6 +425,24 @@ fn bind(raw: &Value, kind: Kind, slots: &[Slot]) -> Result<(Record, Binding, Opt
             }
         }
     }
+    // URLs too must be ones the read can represent, or an edit of them
+    // would drop or mix up what the read never showed.
+    match raw.get("urls") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(urls)) => {
+            let mut hrefs = BTreeSet::new();
+            for url in urls {
+                match url.get("href").and_then(Value::as_str) {
+                    Some(href)
+                        if url.is_object()
+                            && !href.contains(['\n', '\r'])
+                            && hrefs.insert(href.trim()) => {}
+                    _ => binding.ambiguous = true,
+                }
+            }
+        }
+        Some(_) => binding.ambiguous = true,
+    }
     if binding.ambiguous {
         reference = None;
     }
@@ -587,11 +605,13 @@ pub fn apply_edit(raw: &mut RawItem, record: &Record, keys: &BTreeSet<String>) -
                     .iter()
                     .enumerate()
                     .map(|(i, href)| {
-                        let mut entry =
-                            match old.iter().position(|url| str_of(url, "href") == *href) {
-                                Some(position) if old[position].is_object() => old.remove(position),
-                                _ => json!({ "href": href }),
-                            };
+                        let mut entry = match old
+                            .iter()
+                            .position(|url| str_of(url, "href").trim() == *href)
+                        {
+                            Some(position) if old[position].is_object() => old.remove(position),
+                            _ => json!({ "href": href }),
+                        };
                         entry["primary"] = Value::Bool(i == 0);
                         entry
                     })
@@ -1398,5 +1418,49 @@ mod tests {
         let keys: BTreeSet<String> = ["password".to_string()].into();
         assert!(apply_edit(&mut raw, &login, &keys).is_err());
         assert_eq!(raw.0["fields"][0]["value"], "OLD");
+    }
+
+    #[test]
+    fn urls_the_read_cannot_represent_make_an_item_ambiguous() {
+        let login = |urls: Value| {
+            let raw = json!({ "id": "i", "title": "T", "category": "LOGIN", "version": 1,
+                              "fields": [], "urls": urls });
+            parse_item(&raw.to_string()).unwrap().unwrap()
+        };
+        for urls in [
+            json!([{ "href": "https://a.example", "primary": true }, { "href": { "secret": "RAW" } }]),
+            json!([{ "href": "https://a.example", "primary": true }, "RAW_ONLY_STRING"]),
+            json!({ "href": "https://a.example" }),
+            json!([{ "href": "https://a.example", "label": "two" }, { "href": "https://a.example", "primary": true }]),
+            json!([{ "href": "https://a.example\n https://b.example", "primary": true }]),
+        ] {
+            assert!(login(urls.clone()).ambiguous, "{urls}");
+        }
+        assert!(!login(json!([{ "href": "https://a.example", "primary": true }])).ambiguous);
+        assert!(!login(json!([])).ambiguous);
+        assert!(!login(Value::Null).ambiguous);
+    }
+
+    #[test]
+    fn a_url_with_stray_spaces_keeps_its_label_on_an_edit() {
+        let mut raw = RawItem(
+            json!({ "id": "i", "title": "T", "category": "LOGIN", "version": 1,
+            "fields": [],
+            "urls": [{ "label": "login page", "primary": true, "href": " https://b.example " }] }),
+        );
+        let mut record = parse_item(&raw.0.to_string()).unwrap().unwrap().record;
+        assert_eq!(record.urls(), ["https://b.example"]);
+        record.set_urls(&["https://b.example", "https://c.example"]);
+        let keys: BTreeSet<String> = ["urls".to_string()].into();
+        apply_edit(&mut raw, &record, &keys).unwrap();
+        assert_eq!(raw.0["urls"][0]["label"], "login page");
+        assert_eq!(
+            parse_item(&raw.0.to_string())
+                .unwrap()
+                .unwrap()
+                .record
+                .urls(),
+            ["https://b.example", "https://c.example"]
+        );
     }
 }
