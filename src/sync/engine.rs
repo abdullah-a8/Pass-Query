@@ -46,6 +46,9 @@ pub struct Config {
     pub delete_brake_min: usize,
     pub allow_mass_delete: bool,
     pub dry_run: bool,
+    /// Count this run's 1Password requests against the daily budget (not
+    /// when they are the owner's own, outside the service account's).
+    pub record_op_requests: bool,
 }
 
 impl Default for Config {
@@ -61,6 +64,7 @@ impl Default for Config {
             delete_brake_min: 3,
             allow_mass_delete: false,
             dry_run: false,
+            record_op_requests: true,
         }
     }
 }
@@ -243,7 +247,9 @@ impl Engine<'_> {
         if self.config.dry_run {
             return Ok(());
         }
-        self.state.record_op_requests(new, self.now);
+        if self.config.record_op_requests {
+            self.state.record_op_requests(new, self.now);
+        }
         self.recorded_requests = made;
         (self.save)(self.state)
     }

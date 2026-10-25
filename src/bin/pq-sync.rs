@@ -17,6 +17,7 @@ use pq::sync::engine;
 use pq::sync::lock::RunLock;
 use pq::sync::onepassword::OnePassword;
 use pq::sync::proton::Proton;
+use pq::sync::report::Report;
 use pq::sync::secrets::{self, Secret};
 use pq::sync::state::State;
 use pq::sync::{launchd, tty};
@@ -65,8 +66,12 @@ enum Command {
         #[arg(long)]
         as_me: bool,
     },
-    /// Show the last run's report
-    Status,
+    /// Show the last run's report, and what still needs you
+    Status {
+        /// Forget the items that needed you (once you have dealt with them)
+        #[arg(long)]
+        clear: bool,
+    },
     /// Run pq-sync in the background every INTERVAL seconds (macOS)
     InstallAgent {
         #[arg(long, value_name = "SECONDS", default_value_t = 1800)]
@@ -81,11 +86,13 @@ fn main() -> ExitCode {
     process::protect_memory();
     let cli = Cli::parse();
     let quiet = matches!(cli.command, Command::Run { quiet: true, .. });
+    let dry_run = matches!(cli.command, Command::Run { dry_run: true, .. });
     match dispatch(cli.command) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             let message = printable(&format!("{e:#}"));
-            if quiet {
+            // A dry run keeps nothing: its error is printed even when quiet.
+            if quiet && !dry_run {
                 // The agent has nowhere to print: keep the error for status
                 // (unless it is kept already, with what the run did).
                 if e.downcast_ref::<Kept>().is_none() {
@@ -112,7 +119,7 @@ fn dispatch(command: Command) -> Result<()> {
             allow_mass_delete,
             as_me,
         } => run(dry_run, quiet, allow_mass_delete, as_me),
-        Command::Status => status(),
+        Command::Status { clear } => status(clear),
         Command::InstallAgent { interval } => {
             let program = std::env::current_exe()
                 .and_then(|path| path.canonicalize())
@@ -180,6 +187,28 @@ impl std::fmt::Display for Kept {
 
 impl std::error::Error for Kept {}
 
+/// Most lines kept of what needs the owner.
+const ATTENTION_LINES: usize = 500;
+
+/// Add what needs the owner to what is kept until `status --clear`: each
+/// such item is reported once, and the next run's report replaces this one.
+fn keep_attention(report: &Report) -> Result<()> {
+    let lines = report.attention();
+    if lines.is_empty() {
+        return Ok(());
+    }
+    let path = state_dir()?.join("attention.txt");
+    let mut kept = read_private(&path).unwrap_or_default();
+    kept.push_str(&format!("{}\n{lines}", utc(now())));
+    let all: Vec<&str> = kept.lines().collect();
+    let start = all.len().saturating_sub(ATTENTION_LINES);
+    let kept: String = all[start..]
+        .iter()
+        .map(|line| format!("{line}\n"))
+        .collect();
+    write_private(&path, &kept, "attention list")
+}
+
 fn keep_report(text: &str) -> Result<()> {
     let dir = state_dir()?;
     write_private(
@@ -214,17 +243,23 @@ fn check_proxy(proxy: &str) -> Result<()> {
         return Ok(());
     }
     let host_port = proxy_host_port(proxy);
-    let address = host_port
+    let addresses: Vec<_> = host_port
         .to_socket_addrs()
-        .ok()
-        .and_then(|mut addresses| addresses.next())
-        .with_context(|| format!("the proxy {} is not a host:port", printable(host_port)))?;
-    TcpStream::connect_timeout(&address, Duration::from_secs(5)).with_context(|| {
-        format!(
+        .map(|addresses| addresses.take(4).collect())
+        .unwrap_or_default();
+    if addresses.is_empty() {
+        bail!("the proxy {} is not a host:port", printable(host_port));
+    }
+    // A name can resolve to IPv6 and IPv4 while the proxy listens on one.
+    if !addresses
+        .iter()
+        .any(|address| TcpStream::connect_timeout(address, Duration::from_secs(5)).is_ok())
+    {
+        bail!(
             "the proxy {} is unreachable (is Tailscale up?); nothing was synced",
             printable(host_port)
-        )
-    })?;
+        );
+    }
     Ok(())
 }
 
@@ -275,6 +310,8 @@ fn run(dry_run: bool, quiet: bool, allow_mass_delete: bool, as_me: bool) -> Resu
     let mut op = OnePassword::new(&config.op, token);
 
     let mut settings = config.engine();
+    // The owner's own sign-in is not the service account's quota.
+    settings.record_op_requests = !as_me;
     settings.dry_run = dry_run;
     settings.allow_mass_delete = allow_mass_delete;
     if as_me {
@@ -299,6 +336,7 @@ fn run(dry_run: bool, quiet: bool, allow_mass_delete: bool, as_me: bool) -> Resu
         let error = format!("{e:#}");
         if !dry_run {
             keep_report(&format!("{text}Run failed: {}\n", printable(&error)))?;
+            keep_attention(&report)?;
         }
         if !quiet {
             print!("{text}");
@@ -307,6 +345,7 @@ fn run(dry_run: bool, quiet: bool, allow_mass_delete: bool, as_me: bool) -> Resu
     }
     if !dry_run {
         keep_report(&text)?;
+        keep_attention(&report)?;
     }
     if quiet {
         if config.notify && report.needs_attention() {
@@ -339,6 +378,9 @@ fn which(program: &str) -> Option<PathBuf> {
 }
 
 fn setup(proton_proxy: Option<String>, replace: bool) -> Result<()> {
+    let dir = state_dir()?;
+    // Not while a run uses the session or the config.
+    let _lock = RunLock::acquire(&dir.join("run.lock"))?;
     let config_path = config::config_path()?;
     let mut config = Config::load(&config_path)?;
     if let Some(proxy) = proton_proxy {
@@ -390,11 +432,19 @@ fn setup(proton_proxy: Option<String>, replace: bool) -> Result<()> {
         }
         secrets::set(secret, &value)?;
         println!("Stored in the Keychain.");
+        if secret == Secret::ProtonToken {
+            // The old token's session must not outlive it: log in afresh.
+            let session = dir.join("proton-session");
+            if session.exists() {
+                std::fs::remove_dir_all(&session).with_context(|| {
+                    format!("Failed to remove the old session in {}", session.display())
+                })?;
+            }
+        }
     }
 
     println!("\nChecking both sides...");
     check_proxy(&config.proton_proxy)?;
-    let dir = state_dir()?;
     let mut proton = proton(&config, &dir)?;
     proton.ensure_session()?;
     let proton_vaults = proton.vaults()?;
@@ -418,8 +468,17 @@ fn setup(proton_proxy: Option<String>, replace: bool) -> Result<()> {
     Ok(())
 }
 
-fn status() -> Result<()> {
+fn status(clear: bool) -> Result<()> {
     let dir = config::state_dir()?;
+    let attention = dir.join("attention.txt");
+    if clear {
+        if attention.exists() {
+            std::fs::remove_file(&attention)
+                .with_context(|| format!("Failed to remove {}", attention.display()))?;
+        }
+        println!("Cleared the list of items that needed you.");
+        return Ok(());
+    }
     println!("Config: {}", config::config_path()?.display());
     println!("State:  {}", dir.display());
     if let Ok(path) = launchd::plist_path() {
@@ -443,6 +502,9 @@ fn status() -> Result<()> {
     match read_private(&dir.join("last-run.txt")) {
         Some(report) => print!("\nLast run, {report}"),
         None => println!("\nNo run yet."),
+    }
+    if let Some(kept) = read_private(&attention) {
+        print!("\nNeeds you, from earlier runs (`pq-sync status --clear` once done):\n{kept}");
     }
     Ok(())
 }

@@ -25,7 +25,22 @@ fn escape(text: &str) -> String {
 /// The agent's plist: `program run --quiet` every `interval` seconds, with
 /// no output of its own (pq-sync keeps its report in its private state
 /// directory) and at background priority.
-pub fn plist(program: &Path, interval: u64) -> String {
+pub fn plist(program: &Path, interval: u64, env: &[(String, String)]) -> String {
+    let env = if env.is_empty() {
+        String::new()
+    } else {
+        let entries: String = env
+            .iter()
+            .map(|(key, value)| {
+                format!(
+                    "        <key>{}</key>\n        <string>{}</string>\n",
+                    escape(key),
+                    escape(value)
+                )
+            })
+            .collect();
+        format!("    <key>EnvironmentVariables</key>\n    <dict>\n{entries}    </dict>\n")
+    };
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -51,7 +66,7 @@ pub fn plist(program: &Path, interval: u64) -> String {
     <string>/dev/null</string>
     <key>StandardErrorPath</key>
     <string>/dev/null</string>
-</dict>
+{env}</dict>
 </plist>
 "#,
         program = escape(&program.display().to_string())
@@ -70,6 +85,20 @@ fn domain() -> String {
     format!("gui/{}", unsafe { libc::getuid() })
 }
 
+/// The XDG directories this shell sets, for the agent to use the same
+/// config and state (launchd does not pass the shell's environment on).
+fn xdg_env() -> Vec<(String, String)> {
+    ["XDG_CONFIG_HOME", "XDG_STATE_HOME"]
+        .into_iter()
+        .filter_map(|key| {
+            let value = std::env::var(key).ok()?;
+            Path::new(&value)
+                .is_absolute()
+                .then(|| (key.to_string(), value))
+        })
+        .collect()
+}
+
 /// Write the agent and load it (replacing a loaded one).
 pub fn install(program: &Path, interval: u64) -> Result<PathBuf> {
     if interval < 300 {
@@ -83,7 +112,7 @@ pub fn install(program: &Path, interval: u64) -> Result<PathBuf> {
     }
     let path = plist_path()?;
     std::fs::create_dir_all(path.parent().context("plist path has no directory")?)?;
-    std::fs::write(&path, plist(program, interval))
+    std::fs::write(&path, plist(program, interval, &xdg_env()))
         .with_context(|| format!("Failed to write {}", path.display()))?;
     unload(&path)?;
     let output = launchctl(&["bootstrap", &domain(), &path.display().to_string()])?;
@@ -130,12 +159,23 @@ mod tests {
 
     #[test]
     fn the_plist_runs_quietly_on_an_interval() {
-        let plist = plist(Path::new("/Users/me/.cargo/bin/pq-sync"), 1800);
+        let plist = plist(Path::new("/Users/me/.cargo/bin/pq-sync"), 1800, &[]);
         assert!(plist.contains("<string>/Users/me/.cargo/bin/pq-sync</string>"));
         assert!(plist.contains("<string>run</string>\n        <string>--quiet</string>"));
         assert!(plist.contains("<integer>1800</integer>"));
         assert!(plist.contains("<string>/dev/null</string>"));
         assert!(plist.contains(LABEL));
+        assert!(!plist.contains("EnvironmentVariables"));
+    }
+
+    #[test]
+    fn the_shells_xdg_directories_reach_the_agent() {
+        let env = [("XDG_STATE_HOME".to_string(), "/Users/me/st&te".to_string())];
+        let plist = plist(Path::new("/bin/pq-sync"), 1800, &env);
+        assert!(plist.contains(
+            "<key>EnvironmentVariables</key>\n    <dict>\n        \
+             <key>XDG_STATE_HOME</key>\n        <string>/Users/me/st&amp;te</string>\n    </dict>\n</dict>"
+        ));
     }
 
     #[test]
@@ -146,7 +186,7 @@ mod tests {
 
     #[test]
     fn a_path_is_escaped_in_the_plist() {
-        let plist = plist(Path::new("/tmp/a&b<c>/pq-sync"), 1800);
+        let plist = plist(Path::new("/tmp/a&b<c>/pq-sync"), 1800, &[]);
         assert!(plist.contains("/tmp/a&amp;b&lt;c&gt;/pq-sync"));
     }
 }

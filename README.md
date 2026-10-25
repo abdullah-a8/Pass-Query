@@ -125,7 +125,7 @@ Each Proton vault `X` pairs with a 1Password vault named `Proton · X`, which yo
    ```
 3. Run `pq-sync setup`. It asks for both tokens (input hidden) and stores them in the macOS Keychain with a key for the state file. It also records where `pass-cli` and `op` are, and checks both sides. If Proton is blocked where you are, add `--proton-proxy http://host:port`; only pass-cli's traffic goes through it.
 4. Run `pq-sync run --dry-run` to see what would change, then `pq-sync run`. For a first large copy, `pq-sync run --as-me` uses your own 1Password sign-in instead of the service account, which on individual plans allows 100 writes an hour and 1,000 requests a day.
-5. Run `pq-sync install-agent` to sync every 30 minutes in the background. `pq-sync status` shows the last run's report. You get a notification when something needs you.
+5. Run `pq-sync install-agent` to sync every 30 minutes in the background. `pq-sync status` shows the last run's report, plus everything earlier runs found that needs you; clear that list with `pq-sync status --clear` once you have dealt with it. You get a notification when something needs you.
 
 ### What pq-sync keeps
 

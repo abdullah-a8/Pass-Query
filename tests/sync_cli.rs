@@ -255,3 +255,40 @@ fn a_config_others_can_write_is_refused() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("not private"));
     assert!(world.args().is_empty());
 }
+
+#[test]
+fn what_needs_the_owner_is_kept_until_cleared() {
+    let world = World::new("");
+    // No 1Password vault for Proton's "Personal" yet.
+    world.install(
+        "op",
+        &FAKE_OP.replace(
+            r#"echo '[{"id":"ov1","name":"Proton · Personal"}]'"#,
+            "echo '[]'",
+        ),
+    );
+    assert!(world.run(&["run", "--quiet"]).status.success());
+    world.install("op", FAKE_OP);
+    assert!(world.run(&["run", "--quiet"]).status.success());
+
+    let shown = stdout(&world.run(&["status"]));
+    assert!(!shown.contains("In step"), "the second run copied: {shown}");
+    assert!(shown.contains("Needs you, from earlier runs"), "{shown}");
+    assert!(
+        shown.contains("no 1Password vault for Proton's 'Personal'"),
+        "{shown}"
+    );
+
+    assert!(world.run(&["status", "--clear"]).status.success());
+    let shown = stdout(&world.run(&["status"]));
+    assert!(!shown.contains("Needs you"), "{shown}");
+}
+
+#[test]
+fn a_quiet_dry_run_that_fails_keeps_nothing() {
+    let world = World::new("http://127.0.0.1:9");
+    let output = world.run(&["run", "--dry-run", "--quiet"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unreachable"));
+    assert!(!world.path("state/pq-sync/last-run.txt").exists());
+}
