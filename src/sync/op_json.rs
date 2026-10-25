@@ -556,12 +556,28 @@ pub fn apply_edit(raw: &mut RawItem, record: &Record, keys: &BTreeSet<String>) -
             if urls.is_empty() {
                 raw.0.as_object_mut().expect("an object").remove("urls");
             } else {
-                raw.0["urls"] = Value::Array(
-                    urls.iter()
-                        .enumerate()
-                        .map(|(i, href)| json!({ "href": href, "primary": i == 0 }))
-                        .collect(),
-                );
+                // A URL that stays keeps what 1Password holds about it (its
+                // label); only which one is primary changes.
+                let mut old: Vec<Value> = raw
+                    .0
+                    .get("urls")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let edited = urls
+                    .iter()
+                    .enumerate()
+                    .map(|(i, href)| {
+                        let mut entry =
+                            match old.iter().position(|url| str_of(url, "href") == *href) {
+                                Some(position) if old[position].is_object() => old.remove(position),
+                                _ => json!({ "href": href }),
+                            };
+                        entry["primary"] = Value::Bool(i == 0);
+                        entry
+                    })
+                    .collect();
+                raw.0["urls"] = Value::Array(edited);
             }
         } else if let Some(name) = key.strip_prefix(CUSTOM_PREFIX) {
             let field = record.get(key);
@@ -1295,5 +1311,36 @@ mod tests {
             { "id": "expiry", "type": "MONTH_YEAR", "label": "expiry date", "value": "2027/12" },
         ]));
         assert!(both.ambiguous);
+    }
+
+    #[test]
+    fn a_url_edit_keeps_the_labels_of_urls_that_stay() {
+        let mut raw = RawItem(
+            json!({ "id": "i", "title": "T", "category": "LOGIN", "version": 1,
+            "fields": [],
+            "urls": [
+                { "label": "website", "primary": true, "href": "https://a.example" },
+                { "label": "login page", "primary": false, "href": "https://b.example" }
+            ] }),
+        );
+        let mut record = parse_item(&raw.0.to_string()).unwrap().unwrap().record;
+        record.set_urls(&["https://b.example", "https://c.example"]);
+        let keys: BTreeSet<String> = ["urls".to_string()].into();
+        apply_edit(&mut raw, &record, &keys).unwrap();
+        assert_eq!(
+            raw.0["urls"],
+            json!([
+                { "label": "login page", "primary": true, "href": "https://b.example" },
+                { "primary": false, "href": "https://c.example" }
+            ])
+        );
+        assert_eq!(
+            parse_item(&raw.0.to_string())
+                .unwrap()
+                .unwrap()
+                .record
+                .urls(),
+            ["https://b.example", "https://c.example"]
+        );
     }
 }
