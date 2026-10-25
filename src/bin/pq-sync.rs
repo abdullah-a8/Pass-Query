@@ -471,7 +471,8 @@ fn setup(
     }
     config.save(&config_path)?;
     println!("Config: {}", config_path.display());
-    secrets::state_key()?;
+    let key = secrets::state_key()?;
+    let state = State::load(&dir.join("state.json"), &key)?;
 
     // With your own sign-ins there are no tokens to store.
     let tokens = if as_me { &[][..] } else { &TOKENS[..] };
@@ -518,16 +519,34 @@ fn setup(
     let created = as_me || config.create_op_vaults;
     for vault in &proton_vaults {
         let target = format!("{}{}", config.vault_prefix, vault.name);
-        let found = op_vaults.iter().any(|v| v.name == target);
-        println!(
-            "  Proton '{}' -> 1Password '{}': {}",
-            printable(&vault.name),
-            printable(&target),
-            match (found, created) {
-                (true, _) => "ready",
-                (false, true) => "missing: created on the first run",
-                (false, false) => "missing: create it and grant the service account",
+        // A vault already paired stays with its 1Password vault, by ID.
+        let paired = state.vault_for_proton(&vault.id).map(|pair| {
+            op_vaults
+                .iter()
+                .find(|v| v.id == pair.op_vault)
+                .map(|v| v.name.clone())
+        });
+        let (shown, standing) = match paired {
+            Some(Some(name)) => (name, "ready"),
+            Some(None) => (
+                target,
+                "paired, but this sign-in cannot reach its 1Password vault: give it access \
+                 (a service account's vaults are set when it is made, so make a new one)",
+            ),
+            None => {
+                let found = op_vaults.iter().any(|v| v.name == target);
+                let standing = match (found, created) {
+                    (true, _) => "ready",
+                    (false, true) => "missing: created on the first run",
+                    (false, false) => "missing: create it and grant the service account",
+                };
+                (target, standing)
             }
+        };
+        println!(
+            "  Proton '{}' -> 1Password '{}': {standing}",
+            printable(&vault.name),
+            printable(&shown),
         );
     }
     if as_me {

@@ -317,9 +317,24 @@ impl Engine<'_> {
     // ---- vaults -----------------------------------------------------------
 
     fn pair_vaults(&mut self) -> Result<Vec<VaultRun>> {
-        let proton_vaults: Vec<Vault> = self
-            .proton
-            .vaults()?
+        let all_proton = self.proton.vaults()?;
+        // A paired vault this sign-in cannot see (not one the config leaves
+        // out) may hold an item that moved there: nothing gone from Proton
+        // is deleted this run.
+        if self
+            .state
+            .vaults
+            .iter()
+            .any(|pair| !all_proton.iter().any(|v| v.id == pair.proton_share))
+        {
+            self.proton_unread = true;
+            self.report.push(Event::Vault(
+                "a paired Proton vault is out of reach (deleted, or no longer shared with this \
+                 sign-in): nothing gone from Proton is deleted in 1Password while it is"
+                    .to_string(),
+            ));
+        }
+        let proton_vaults: Vec<Vault> = all_proton
             .into_iter()
             .filter(|vault| {
                 (self.config.include_vaults.is_empty()
@@ -376,10 +391,14 @@ impl Engine<'_> {
                     Some(vault) => vault.clone(),
                     None => {
                         self.report.push(Event::Vault(format!(
-                            "the 1Password vault paired with '{}' is gone, or the service account \
-                             can no longer reach it; skipped",
+                            "the 1Password vault paired with '{}' is gone, or this sign-in \
+                             cannot reach it: skipped, and nothing gone from 1Password is \
+                             trashed in Proton while it is",
                             crate::text::printable(&proton_vault.name)
                         )));
+                        // An item may have moved there: nothing gone from
+                        // 1Password is deleted this run.
+                        self.op_unread = true;
                         continue;
                     }
                 },

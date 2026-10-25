@@ -831,3 +831,40 @@ fn a_vault_name_two_proton_vaults_share_pairs_with_neither() {
     assert!(w.state.vaults.is_empty());
     assert!(w.op.writes.is_empty() && w.proton.writes.is_empty());
 }
+
+#[test]
+fn a_paired_vault_this_sign_in_cannot_reach_holds_back_deletions() {
+    let mut w = World::new();
+    w.proton.vault("ps2", "Work");
+    w.op.vault("ov2", "Proton · Work");
+    let id = w.proton.add("ps1", login("Site", "alice", "pw1"));
+    w.sync();
+    let op_id = w.op_item_of(&id);
+    // Moved in 1Password into a vault the next sign-in cannot see.
+    w.op.move_item(&op_id, "ov1", "ov2").unwrap();
+    w.op.vaults.retain(|v| v.id != "ov2");
+    let report = w.sync();
+    assert!(
+        !has(&report, |e| matches!(e, Event::TrashedInProton { .. })),
+        "{report}"
+    );
+    assert_eq!(w.proton.active_in("ps1").len(), 1);
+}
+
+#[test]
+fn a_paired_proton_vault_out_of_reach_holds_back_deletions() {
+    let mut w = World::new();
+    w.proton.vault("ps2", "Work");
+    w.op.vault("ov2", "Proton · Work");
+    let id = w.proton.add("ps1", login("Site", "alice", "pw1"));
+    w.sync();
+    // Moved in Proton into a vault the next sign-in cannot see.
+    w.proton.move_by_owner("ps1", &id, "ps2");
+    w.proton.vaults.retain(|v| v.id != "ps2");
+    let report = w.sync();
+    assert!(
+        !has(&report, |e| matches!(e, Event::ArchivedInOp { .. })),
+        "{report}"
+    );
+    assert_eq!(w.op.in_vault("ov1").len(), 1);
+}

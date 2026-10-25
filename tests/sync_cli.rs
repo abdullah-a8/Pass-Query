@@ -379,3 +379,19 @@ fn as_me_is_refused_away_from_a_terminal() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("at the keyboard"));
 }
+
+#[test]
+fn setup_names_a_paired_vault_this_sign_in_cannot_reach() {
+    let world = World::new("");
+    assert!(world.run(&["run"]).status.success());
+    // The 1Password vault it paired with is out of the token's reach now.
+    fs::write(world.path("fake/vaults.json"), "[]").unwrap();
+    let setup = world.run(&["setup", "--create-vaults"]);
+    let shown = stdout(&setup);
+    assert!(setup.status.success(), "{shown}");
+    assert!(
+        shown.contains("paired, but this sign-in cannot reach"),
+        "{shown}"
+    );
+    assert!(!shown.contains("created on the first run"), "{shown}");
+}
