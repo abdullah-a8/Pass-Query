@@ -16,7 +16,8 @@ use std::time::Duration;
 use super::api::{OpApi, OpSummary, Vault, op_requests};
 use super::exec::{Command, Output};
 use super::op_json::{self, OpItem, RawItem};
-use super::secret::{SecretString, parse_json};
+use super::secret::SecretString;
+use crate::json::parse_json;
 use crate::text::printable;
 
 const TIMEOUT: Duration = Duration::from_secs(120);

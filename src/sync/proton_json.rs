@@ -12,7 +12,8 @@ use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
 use super::record::{FieldKind, Kind, Record, normalize_card_number, normalize_expiry};
-use super::secret::{SecretString, parse_json};
+use super::secret::SecretString;
+use crate::json::parse_json;
 
 /// A Proton item read with its secrets.
 #[derive(Debug)]

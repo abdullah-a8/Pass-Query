@@ -353,3 +353,17 @@ fn print_mode_writes_the_exact_value_to_a_pipe() {
         "Username: user\u{1b}[31m\nPassword: pass\tword\n"
     );
 }
+
+#[test]
+fn malformed_pass_cli_output_is_reported_without_quoting_it() {
+    let h = personal_vault();
+    // A secret where pq expects an object: serde's own message quotes it.
+    h.replace_view("item-github", r#"{"item":"github-secret"}"#);
+
+    let out = h.run(&["github", "-p"]);
+
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(!err.contains("github-secret"), "{err}");
+    assert!(err.contains("item view"), "{err}");
+}

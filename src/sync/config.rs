@@ -11,7 +11,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use super::engine;
-use super::secret::parse_json;
+use crate::json::parse_json;
 use crate::private_file::{ensure_private_dir, read_private, write_private};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

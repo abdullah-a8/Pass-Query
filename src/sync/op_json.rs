@@ -27,7 +27,8 @@ use super::proton_json::{IDENTITY_FIELDS, identity_field_kind};
 use super::record::{
     CUSTOM_PREFIX, FieldKind, Kind, Record, normalize_card_number, normalize_expiry,
 };
-use super::secret::{SecretString, parse_json};
+use super::secret::SecretString;
+use crate::json::parse_json;
 
 /// pq-sync's section for fields 1Password has no built-in slot for.
 pub const SECTION_ID: &str = "pq-sync";

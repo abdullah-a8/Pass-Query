@@ -16,7 +16,8 @@ use std::time::Duration;
 use super::api::{ProtonApi, ProtonSummary, Vault};
 use super::exec::{Command, Output};
 use super::proton_json::{self, CreateTemplate, ProtonItem};
-use super::secret::{SecretString, parse_json};
+use super::secret::SecretString;
+use crate::json::parse_json;
 use crate::pass_cli::{SessionProblem, failure, item_is_certainly_gone};
 use crate::text::printable;
 

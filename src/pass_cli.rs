@@ -3,6 +3,7 @@ use colored::Colorize;
 use std::fmt;
 use tokio::process::Command;
 
+use crate::json::parse_json;
 use crate::models::{ItemList, ItemView, Match, Vault, VaultList};
 use crate::text::printable;
 
@@ -239,8 +240,7 @@ pub async fn fetch_vaults() -> Result<VaultList> {
 
     let stdout = String::from_utf8(output.stdout).context("Invalid UTF-8 in pass-cli output")?;
 
-    let vault_list: VaultList =
-        serde_json::from_str(&stdout).context("Failed to parse vault list JSON")?;
+    let vault_list: VaultList = parse_json(&stdout, "pass-cli's vault list")?;
 
     Ok(vault_list)
 }
@@ -285,10 +285,13 @@ pub async fn list_vault_items(vault: &Vault, login_only: bool) -> Result<ItemLis
     let stdout =
         String::from_utf8(output.stdout).context("Invalid UTF-8 in pass-cli item list output")?;
 
-    let item_list: ItemList = serde_json::from_str(&stdout).context(format!(
-        "Failed to parse item list JSON for vault '{}'",
-        printable(&vault.name)
-    ))?;
+    let item_list: ItemList = parse_json(
+        &stdout,
+        &format!(
+            "pass-cli's item list for vault '{}'",
+            printable(&vault.name)
+        ),
+    )?;
 
     Ok(item_list)
 }
@@ -384,8 +387,7 @@ pub async fn get_item_credentials(item: &Match) -> Result<(Option<String>, Strin
 
     let stdout = String::from_utf8(output.stdout).context("Invalid UTF-8 in item view output")?;
 
-    let item_view: ItemView =
-        serde_json::from_str(&stdout).context("Failed to parse item view JSON")?;
+    let item_view: ItemView = parse_json(&stdout, "pass-cli's item view")?;
     if !item_view.item.is_active() {
         return Err(ItemUnavailable::new(item, "is in the trash").into());
     }
