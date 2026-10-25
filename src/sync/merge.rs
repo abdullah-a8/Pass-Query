@@ -20,13 +20,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::record::{FieldHash, Record};
+use super::record::FieldHash;
 
+/// Each side's field hashes (`Record::field_hashes`), the 1Password side
+/// already translated to Proton's form where the pair records that
+/// 1Password stores a value differently (see `ItemPair::equivalents`).
 pub struct MergeInput<'a> {
     pub base: &'a BTreeMap<String, FieldHash>,
-    pub proton: &'a Record,
-    pub op: &'a Record,
-    pub key: &'a [u8],
+    pub proton: &'a BTreeMap<String, FieldHash>,
+    pub op: &'a BTreeMap<String, FieldHash>,
     pub proton_missing: &'a BTreeSet<String>,
     pub op_guarded: bool,
 }
@@ -50,8 +52,7 @@ pub struct MergePlan {
 }
 
 pub fn plan(input: MergeInput<'_>) -> MergePlan {
-    let proton = input.proton.field_hashes(input.key);
-    let op = input.op.field_hashes(input.key);
+    let (proton, op) = (input.proton, input.op);
     let all: BTreeSet<&String> = input
         .base
         .keys()
@@ -108,7 +109,7 @@ pub fn plan(input: MergeInput<'_>) -> MergePlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::record::{FieldKind, Kind};
+    use crate::sync::record::{FieldKind, Kind, Record};
 
     const KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
 
@@ -151,9 +152,8 @@ mod tests {
         fn plan(&self) -> MergePlan {
             plan(MergeInput {
                 base: &self.base.field_hashes(KEY),
-                proton: &self.proton,
-                op: &self.op,
-                key: KEY,
+                proton: &self.proton.field_hashes(KEY),
+                op: &self.op.field_hashes(KEY),
                 proton_missing: &self.missing,
                 op_guarded: self.guarded,
             })

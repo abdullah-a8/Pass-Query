@@ -58,6 +58,8 @@ impl fmt::Debug for RawItem {
 
 /// A 1Password item read with its secrets.
 pub struct OpItem {
+    /// The item's ID; never empty.
+    pub id: String,
     pub record: Record,
     pub raw: RawItem,
     /// The Proton reference pq-sync stored on the item, if it is there,
@@ -504,6 +506,12 @@ pub fn parse_item(json: &str) -> Result<Option<OpItem>> {
     let Some(kind) = kind_of_category(category) else {
         return Ok(None);
     };
+    let id = root
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .context("op item output has no item ID")?
+        .to_string();
     let (mut record, binding, proton_ref) = bind(&root, kind, &slots(kind))?;
 
     let mut urls: Vec<(bool, &str)> = root
@@ -525,6 +533,7 @@ pub fn parse_item(json: &str) -> Result<Option<OpItem>> {
         .and_then(Value::as_array)
         .is_some_and(|files| !files.is_empty());
     Ok(Some(OpItem {
+        id,
         record,
         raw: RawItem(root),
         proton_ref,
@@ -1062,6 +1071,15 @@ mod tests {
         );
         // A value that is not text is kept in the raw item, not read.
         assert!(item.record.keys().all(|key| !key.contains("address")));
+    }
+
+    #[test]
+    fn an_item_without_an_id_is_refused() {
+        for id in [json!(null), json!(""), json!(7)] {
+            let item = json!({ "id": id, "title": "t", "category": "LOGIN", "fields": [] });
+            let err = parse_item(&item.to_string()).err().unwrap();
+            assert!(err.to_string().contains("no item ID"), "{err}");
+        }
     }
 
     #[test]

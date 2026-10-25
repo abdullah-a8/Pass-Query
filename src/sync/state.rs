@@ -39,6 +39,17 @@ pub struct State {
     /// Unix times of 1Password requests in the last day, for the budget.
     #[serde(default)]
     pub op_requests: Vec<u64>,
+    /// 1Password copies asked for but not yet seen made: a copy whose reply
+    /// was lost (a timeout, a crash) is paired by its reference alone.
+    #[serde(default)]
+    pub pending: Vec<PendingCopy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingCopy {
+    pub proton_share: String,
+    pub proton_item: String,
+    pub op_vault: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -72,9 +83,6 @@ pub struct ItemPair {
     /// Each field's keyed hash at the last point both sides agreed.
     #[serde(default)]
     pub base: BTreeMap<String, FieldHash>,
-    /// `op_json::visible_fingerprint` of the 1Password item at the last sync.
-    #[serde(default)]
-    pub op_visible: String,
     /// Fields Proton could not receive when the item came from 1Password.
     #[serde(default)]
     pub proton_missing: BTreeSet<String>,
@@ -82,10 +90,25 @@ pub struct ItemPair {
     /// CLI cannot show (a passkey) or keep (files).
     #[serde(default)]
     pub op_guarded: bool,
-    /// The hash of each 1Password-only change already reported, so a run
-    /// reports a change once, not every time.
+    /// Fields where 1Password differs from the base, by field: the
+    /// 1Password value's hash ("" when absent), so it stands for
+    /// 1Password's value when the item is not read; a 1Password-only change
+    /// is reported once. `!field`: a Proton value held back from a guarded
+    /// item, reported once.
     #[serde(default)]
     pub reported: BTreeMap<String, FieldHash>,
+    /// Fields 1Password stores differently from how Proton gave them (it
+    /// normalised a URL, say): 1Password's hash stands for Proton's, so the
+    /// difference is not read as a change and written again every run.
+    #[serde(default)]
+    pub equivalents: BTreeMap<String, Equivalent>,
+}
+
+/// One field's value as each side stores it, by hash ("" when absent).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Equivalent {
+    pub proton: FieldHash,
+    pub op: FieldHash,
 }
 
 impl State {
@@ -96,6 +119,7 @@ impl State {
             vaults: Vec::new(),
             items: Vec::new(),
             op_requests: Vec::new(),
+            pending: Vec::new(),
         }
     }
 
@@ -198,10 +222,10 @@ mod tests {
             proton_modified: "2026-10-25T00:00:00".into(),
             op_version: 3,
             base: BTreeMap::from([("title".to_string(), "ab".repeat(32))]),
-            op_visible: "cd".repeat(32),
             proton_missing: BTreeSet::from(["note".to_string()]),
             op_guarded: false,
             reported: BTreeMap::new(),
+            equivalents: BTreeMap::new(),
         }
     }
 
