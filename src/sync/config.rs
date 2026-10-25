@@ -7,6 +7,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use super::engine;
@@ -94,8 +95,15 @@ fn home() -> Result<PathBuf> {
 }
 
 fn xdg(var: &str, fallback: &[&str]) -> Result<PathBuf> {
-    match std::env::var_os(var).filter(|dir| !dir.is_empty()) {
-        Some(dir) => Ok(PathBuf::from(dir)),
+    base_dir(std::env::var_os(var), fallback)
+}
+
+/// The XDG directory `value` names, or the home default. The XDG spec says
+/// to ignore a relative value: it would move with the working directory,
+/// and a run from elsewhere would find no state and start over.
+fn base_dir(value: Option<OsString>, fallback: &[&str]) -> Result<PathBuf> {
+    match value.map(PathBuf::from).filter(|dir| dir.is_absolute()) {
+        Some(dir) => Ok(dir),
         None => Ok(fallback.iter().fold(home()?, |path, part| path.join(part))),
     }
 }
@@ -116,6 +124,18 @@ pub fn state_dir() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_absolute_xdg_directory_is_used() {
+        let default = home().unwrap().join(".config");
+        assert_eq!(
+            base_dir(Some("/x/conf".into()), &[".config"]).unwrap(),
+            PathBuf::from("/x/conf")
+        );
+        for ignored in [None, Some("".into()), Some("relative/conf".into())] {
+            assert_eq!(base_dir(ignored, &[".config"]).unwrap(), default);
+        }
+    }
 
     #[test]
     fn a_missing_config_is_the_defaults_and_a_saved_one_round_trips() {
