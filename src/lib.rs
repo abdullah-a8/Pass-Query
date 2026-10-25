@@ -13,4 +13,5 @@ pub mod private_file;
 pub mod process;
 pub mod search;
 pub mod selection;
+pub mod sync;
 pub mod text;
