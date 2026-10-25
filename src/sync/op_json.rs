@@ -686,7 +686,14 @@ pub fn apply_edit(raw: &mut RawItem, record: &Record, keys: &BTreeSet<String>) -
         } else if let Some(slot) = slots.iter().find(|slot| slot.key == key) {
             let value = record.value(key);
             if slot.key == "expiration_date" {
-                write_expiry(&binding, slot, value, &mut changes, &mut sections);
+                write_expiry(
+                    &fields_now,
+                    &binding,
+                    slot,
+                    value,
+                    &mut changes,
+                    &mut sections,
+                );
             } else {
                 let value = if slot.key == "number" {
                     normalize_card_number(value)
@@ -694,6 +701,7 @@ pub fn apply_edit(raw: &mut RawItem, record: &Record, keys: &BTreeSet<String>) -
                     value.to_string()
                 };
                 write_slot(
+                    &fields_now,
                     binding.slots.get(slot.key).copied(),
                     slot,
                     value,
@@ -737,6 +745,7 @@ pub fn apply_edit(raw: &mut RawItem, record: &Record, keys: &BTreeSet<String>) -
 /// fields and empties built-in ones (even in a section, like a card's
 /// PIN), so the item keeps its shape. The field gets the slot's type.
 fn write_slot(
+    fields: &[Value],
     bound: Option<usize>,
     slot: &Slot,
     value: String,
@@ -747,11 +756,21 @@ fn write_slot(
         Some(index) if value.is_empty() && slot.section == OWN_SECTION => {
             changes.push(Change::Remove(index));
         }
-        Some(index) => changes.push(Change::Set {
-            index,
-            value,
-            op_type: slot.op_type.to_string(),
-        }),
+        Some(index) => {
+            // A field the owner concealed in 1Password stays concealed.
+            let current = str_of(&fields[index], "type");
+            let op_type =
+                if slot.kind == FieldKind::Text && kind_of_type(current) == FieldKind::Concealed {
+                    current
+                } else {
+                    slot.op_type
+                };
+            changes.push(Change::Set {
+                index,
+                value,
+                op_type: op_type.to_string(),
+            });
+        }
         None if value.is_empty() => {}
         None => {
             let mut field = json!({
@@ -775,6 +794,7 @@ fn write_slot(
 /// A month of a year goes in 1Password's month/year field; anything else
 /// in a text field beside it, since the month/year field would refuse it.
 fn write_expiry(
+    fields: &[Value],
     binding: &Binding,
     slot: &Slot,
     value: &str,
@@ -793,12 +813,27 @@ fn write_expiry(
     match normalize_expiry(value) {
         // The form op takes for a month/year field.
         Some(year_month) => {
-            write_slot(bound, slot, year_month.replace('-', "/"), changes, sections);
-            write_slot(binding.expiry_text, &text, String::new(), changes, sections);
+            write_slot(
+                fields,
+                bound,
+                slot,
+                year_month.replace('-', "/"),
+                changes,
+                sections,
+            );
+            write_slot(
+                fields,
+                binding.expiry_text,
+                &text,
+                String::new(),
+                changes,
+                sections,
+            );
         }
         None if !value.is_empty() => {
-            write_slot(bound, slot, String::new(), changes, sections);
+            write_slot(fields, bound, slot, String::new(), changes, sections);
             write_slot(
+                fields,
                 binding.expiry_text,
                 &text,
                 value.to_string(),
@@ -807,8 +842,15 @@ fn write_expiry(
             );
         }
         None => {
-            write_slot(bound, slot, String::new(), changes, sections);
-            write_slot(binding.expiry_text, &text, String::new(), changes, sections);
+            write_slot(fields, bound, slot, String::new(), changes, sections);
+            write_slot(
+                fields,
+                binding.expiry_text,
+                &text,
+                String::new(),
+                changes,
+                sections,
+            );
         }
     }
 }
@@ -1566,5 +1608,24 @@ mod tests {
             "fields": [{ "id": "password", "type": "CONCEALED", "purpose": "PASSWORD", "value": "x" }],
             "urls": [{ "href": "https://a.test", "primary": true, "label": "website" }] });
         assert!(!parse_item(&fine.to_string()).unwrap().unwrap().ambiguous);
+    }
+
+    #[test]
+    fn an_edit_keeps_a_field_the_owner_concealed_concealed() {
+        let mut raw = RawItem(
+            json!({ "id": "i", "title": "T", "category": "LOGIN", "version": 1,
+            "fields": [{ "id": "username", "type": "CONCEALED", "purpose": "USERNAME",
+                         "label": "username", "value": "old-user" }] }),
+        );
+        let mut record = parse_item(&raw.0.to_string()).unwrap().unwrap().record;
+        record.set("username", "new-user", FieldKind::Text);
+        let keys: BTreeSet<String> = ["username".to_string()].into();
+        apply_edit(&mut raw, &record, &keys).unwrap();
+        assert_eq!(raw.0["fields"][0]["type"], "CONCEALED");
+        assert_eq!(raw.0["fields"][0]["value"], "new-user");
+        assert_eq!(
+            parse_item(&raw.0.to_string()).unwrap().unwrap().record,
+            record
+        );
     }
 }
