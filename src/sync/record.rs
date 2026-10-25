@@ -90,6 +90,10 @@ impl Record {
     /// Set `key` to `value`; an empty value removes the field.
     pub fn set(&mut self, key: &str, value: impl Into<String>, kind: FieldKind) {
         let value = value.into();
+        if key == "urls" {
+            // One URL per line, whatever the value's line breaks.
+            return self.set_urls(&value.split(['\r', '\n']).collect::<Vec<_>>());
+        }
         if value.is_empty() {
             self.fields.remove(key);
         } else {
@@ -97,17 +101,29 @@ impl Record {
         }
     }
 
-    /// Set the URL list: empty entries dropped, each URL once (where it
-    /// first appears), order kept.
+    /// Set the URL list: split at line breaks, empty entries dropped, each
+    /// URL once (where it first appears), order kept. So a URL list never
+    /// holds a line break or a URL twice, and neither is ever written.
     pub fn set_urls<S: AsRef<str>>(&mut self, urls: &[S]) {
         let mut seen = std::collections::BTreeSet::new();
         let joined = urls
             .iter()
-            .map(|url| url.as_ref().trim())
+            .flat_map(|url| url.as_ref().split(['\r', '\n']))
+            .map(str::trim)
             .filter(|url| !url.is_empty() && seen.insert(*url))
             .collect::<Vec<_>>()
             .join("\n");
-        self.set("urls", joined, FieldKind::Urls);
+        if joined.is_empty() {
+            self.fields.remove("urls");
+        } else {
+            self.fields.insert(
+                "urls".to_string(),
+                Field {
+                    value: joined,
+                    kind: FieldKind::Urls,
+                },
+            );
+        }
     }
 
     /// Add a custom field named `name` and return the key it got. A name
@@ -424,5 +440,31 @@ mod tests {
             record.add_custom("", "c", FieldKind::Text).as_deref(),
             Some("x:")
         );
+    }
+
+    #[test]
+    fn a_url_list_never_holds_a_line_break_or_a_url_twice() {
+        let mut record = Record::new(Kind::Login);
+        record.set_urls(&[
+            "https://a.example\rhttps://b.example",
+            "https://c.example\r\n",
+            "https://a.example",
+        ]);
+        assert_eq!(
+            record.urls(),
+            [
+                "https://a.example",
+                "https://b.example",
+                "https://c.example"
+            ]
+        );
+        // Set as a plain field, the same rules hold.
+        record.set(
+            "urls",
+            "https://x.example\r\nhttps://x.example",
+            FieldKind::Urls,
+        );
+        assert_eq!(record.urls(), ["https://x.example"]);
+        assert!(record.value("urls").chars().all(|c| c != '\r'));
     }
 }
