@@ -9,6 +9,7 @@ pub mod clipboard;
 pub mod lookup;
 pub mod models;
 pub mod pass_cli;
+pub mod private_file;
 pub mod process;
 pub mod search;
 pub mod selection;
