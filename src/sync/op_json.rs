@@ -321,69 +321,6 @@ fn in_own_section(field: &Value) -> bool {
     section_id(field) == Some(SECTION_ID)
 }
 
-/// Whether `value` reads as an email address: something, an @, something,
-/// and no spaces. Only to tell which of Proton's two login fields an
-/// address alone in 1Password's username field belongs in.
-fn looks_like_email(value: &str) -> bool {
-    match value.split_once('@') {
-        Some((local, domain)) => {
-            !local.is_empty()
-                && !domain.is_empty()
-                && !domain.contains('@')
-                && !value.contains(char::is_whitespace)
-        }
-        None => false,
-    }
-}
-
-/// A login's username and email as 1Password lays them out: its username
-/// field holds what one signs in with, the username or else the email
-/// (Proton keeps an address typed as "email or username" in its email
-/// field); the email goes beside it only when both are there.
-fn login_layout(username: &str, email: &str) -> (String, String) {
-    if username.is_empty() {
-        (email.to_string(), String::new())
-    } else {
-        (username.to_string(), email.to_string())
-    }
-}
-
-/// The reverse of [`login_layout`] on a read: an address alone in the
-/// username field is the email.
-fn read_login(record: &mut Record) {
-    if record.kind != Kind::Login || !record.value("email").is_empty() {
-        return;
-    }
-    let username = record.value("username").to_string();
-    if looks_like_email(&username) {
-        record.set("username", "", FieldKind::Text);
-        record.set("email", username, FieldKind::Text);
-    }
-}
-
-/// The keys an edit of `keys` writes: a login's username and email are
-/// laid out together, so writing one may move the other.
-pub fn written_keys(kind: Kind, keys: &BTreeSet<String>) -> BTreeSet<String> {
-    let mut written = keys.clone();
-    if kind == Kind::Login && (keys.contains("username") || keys.contains("email")) {
-        written.insert("username".to_string());
-        written.insert("email".to_string());
-    }
-    written
-}
-
-/// Whether the login is laid out otherwise than pq-sync lays it out now
-/// (by an older pq-sync): writing its own username and email back would
-/// change it.
-pub fn needs_relayout(item: &OpItem) -> bool {
-    if item.record.kind != Kind::Login {
-        return false;
-    }
-    let mut raw = item.raw.clone();
-    let keys = written_keys(Kind::Login, &BTreeSet::from(["username".to_string()]));
-    apply_edit(&mut raw, &item.record, &keys).is_ok() && raw.0 != item.raw.0
-}
-
 /// What a Proton reference looks like: `share_id/item_id`, both pass-cli IDs.
 fn looks_like_reference(value: &str) -> bool {
     let id = |part: &str| {
@@ -577,7 +514,6 @@ pub fn parse_item(json: &str) -> Result<Option<OpItem>> {
         .context("op item output has no item ID")?
         .to_string();
     let (mut record, binding, proton_ref) = bind(&root, kind, &slots(kind))?;
-    read_login(&mut record);
 
     let mut urls: Vec<(bool, &str)> = root
         .get("urls")
@@ -693,47 +629,16 @@ pub fn apply_edit(raw: &mut RawItem, record: &Record, keys: &BTreeSet<String>) -
         );
     }
     let slots = slots(record.kind);
-    let (mut now, binding, _) = bind(&raw.0, record.kind, &slots)?;
+    let (_, binding, _) = bind(&raw.0, record.kind, &slots)?;
     if binding.ambiguous {
         bail!("the 1Password item has a field pq-sync uses more than once; edit it in 1Password");
     }
-    read_login(&mut now);
 
     let mut changes = Vec::new();
     let mut new_ids = BTreeSet::new();
     let mut sections = BTreeSet::new();
     let fields_now = fields_of(&raw.0)?.to_vec();
-    // A login's username and email are laid out together: a key not
-    // written keeps the value 1Password has now.
-    let login = record.kind == Kind::Login && (keys.contains("username") || keys.contains("email"));
-    if login {
-        let value = |key: &str| {
-            if keys.contains(key) {
-                record.value(key)
-            } else {
-                now.value(key)
-            }
-        };
-        let (in_username, in_email) = login_layout(value("username"), value("email"));
-        for (key, value) in [("username", in_username), ("email", in_email)] {
-            let slot = slots
-                .iter()
-                .find(|slot| slot.key == key)
-                .expect("a login has both slots");
-            write_slot(
-                &fields_now,
-                binding.slots.get(key).copied(),
-                slot,
-                value,
-                &mut changes,
-                &mut sections,
-            );
-        }
-    }
     for key in keys {
-        if login && (key == "username" || key == "email") {
-            continue;
-        }
         if key == "title" {
             raw.0["title"] = Value::String(record.title().to_string());
         } else if key == "urls" {
@@ -1822,92 +1727,5 @@ mod tests {
         let keys: BTreeSet<String> = ["email".to_string()].into();
         apply_edit(&mut raw, &record, &keys).unwrap();
         assert!(raw.0["fields"].as_array().unwrap().is_empty());
-    }
-
-    fn login(username: &str, email: &str) -> Record {
-        let mut r = Record::new(Kind::Login);
-        r.set("title", "Site", FieldKind::Text);
-        r.set("username", username, FieldKind::Text);
-        r.set("email", email, FieldKind::Text);
-        r
-    }
-
-    fn field_value(item: &Value, id: &str) -> Option<String> {
-        item["fields"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|f| f["id"] == id)
-            .map(|f| f["value"].as_str().unwrap_or("").to_string())
-    }
-
-    #[test]
-    fn a_login_signs_in_with_its_username_or_else_its_email() {
-        for (username, email, in_username, in_email) in [
-            ("", "me@example.com", "me@example.com", None),
-            ("alice", "me@example.com", "alice", Some("me@example.com")),
-            ("alice", "", "alice", None),
-        ] {
-            let record = login(username, email);
-            let returned = as_returned(&create_json(&record, "s/i"), json!([]));
-            let item: Value = serde_json::from_str(&returned).unwrap();
-            assert_eq!(field_value(&item, "username").as_deref(), Some(in_username));
-            assert_eq!(field_value(&item, "pqsync-email").as_deref(), in_email);
-            // Read back as it was given.
-            let read = parse_item(&returned).unwrap().unwrap();
-            assert_eq!(read.record, record, "{username:?} {email:?}");
-            assert!(!needs_relayout(&read));
-        }
-    }
-
-    #[test]
-    fn only_an_address_alone_in_the_username_reads_as_the_email() {
-        assert!(looks_like_email("me@example.com"));
-        for not in ["alice", "@example.com", "me@", "me @example.com", "a@b@c"] {
-            assert!(!looks_like_email(not), "{not}");
-        }
-        let returned = as_returned(&create_json(&login("alice", ""), "s/i"), json!([]));
-        let read = parse_item(&returned).unwrap().unwrap();
-        assert_eq!(read.record.value("username"), "alice");
-        assert_eq!(read.record.value("email"), "");
-    }
-
-    #[test]
-    fn writing_one_of_username_and_email_keeps_the_other_as_1password_has_it() {
-        let returned = as_returned(
-            &create_json(&login("alice", "old@example.com"), "s/i"),
-            json!([]),
-        );
-        let mut raw = parse_item(&returned).unwrap().unwrap().raw;
-        // Proton cleared the username; its email (stale here) is not written.
-        let keys = BTreeSet::from(["username".to_string()]);
-        apply_edit(&mut raw, &login("", "ignored@example.com"), &keys).unwrap();
-        assert_eq!(
-            field_value(&raw.0, "username").as_deref(),
-            Some("old@example.com")
-        );
-        assert_eq!(field_value(&raw.0, "pqsync-email"), None);
-    }
-
-    #[test]
-    fn a_login_laid_out_by_an_older_pq_sync_is_told_apart() {
-        let mut item = json!({
-            "id": "o1", "version": 3, "title": "Site", "category": "LOGIN",
-            "sections": [{ "id": SECTION_ID, "label": SECTION_LABEL }],
-            "fields": [
-                { "id": "username", "type": "STRING", "purpose": "USERNAME", "label": "username", "value": "" },
-                { "id": "pqsync-email", "type": "EMAIL", "label": "email", "value": "me@example.com",
-                  "section": { "id": SECTION_ID, "label": SECTION_LABEL } },
-            ],
-        });
-        let old = parse_item(&item.to_string()).unwrap().unwrap();
-        assert_eq!(old.record, login("", "me@example.com"));
-        assert!(needs_relayout(&old));
-        item["fields"] = json!([
-            { "id": "username", "type": "STRING", "purpose": "USERNAME", "label": "username", "value": "me@example.com" },
-        ]);
-        let now = parse_item(&item.to_string()).unwrap().unwrap();
-        assert_eq!(now.record, old.record, "the same values");
-        assert!(!needs_relayout(&now));
     }
 }

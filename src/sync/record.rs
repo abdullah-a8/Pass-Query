@@ -183,6 +183,22 @@ impl Record {
         self.value("title")
     }
 
+    /// A Proton login as the other side sees it: its username is what one
+    /// signs in with, Proton's username or else its email. Proton keeps an
+    /// address typed as "email or username" in its email field and leaves
+    /// the username empty; 1Password has one username field, which autofill
+    /// fills. Any other record is as it is.
+    pub fn with_signin_as_username(&self) -> Record {
+        let mut record = self.clone();
+        if record.kind == Kind::Login
+            && record.value("username").is_empty()
+            && let Some(email) = record.fields.remove("email")
+        {
+            record.fields.insert("username".to_string(), email);
+        }
+        record
+    }
+
     pub fn fields(&self) -> impl Iterator<Item = (&str, &Field)> {
         self.fields.iter().map(|(key, field)| (key.as_str(), field))
     }
@@ -205,6 +221,20 @@ impl Record {
             .iter()
             .map(|(name, field)| (name.clone(), field_hash(key, name, field)))
             .collect()
+    }
+}
+
+/// Whether `value` reads as an email address: something, an @, something,
+/// and no spaces.
+pub fn looks_like_email(value: &str) -> bool {
+    match value.split_once('@') {
+        Some((local, domain)) => {
+            !local.is_empty()
+                && !domain.is_empty()
+                && !domain.contains('@')
+                && !value.contains(char::is_whitespace)
+        }
+        None => false,
     }
 }
 
@@ -468,5 +498,43 @@ mod tests {
         );
         assert_eq!(record.urls(), ["https://x.example"]);
         assert!(record.value("urls").chars().all(|c| c != '\r'));
+    }
+
+    #[test]
+    fn a_login_signs_in_with_its_username_or_else_its_email() {
+        let login = |username: &str, email: &str| {
+            let mut r = Record::new(Kind::Login);
+            r.set("username", username, FieldKind::Text);
+            r.set("email", email, FieldKind::Text);
+            r
+        };
+        for ((username, email), (signin, beside)) in [
+            (("", "me@example.com"), ("me@example.com", "")),
+            (("alice", "me@example.com"), ("alice", "me@example.com")),
+            (("alice", ""), ("alice", "")),
+            (("", ""), ("", "")),
+        ] {
+            let read = login(username, email).with_signin_as_username();
+            assert_eq!(read.value("username"), signin);
+            assert_eq!(read.value("email"), beside);
+        }
+        let mut note = Record::new(Kind::Identity);
+        note.set("email", "me@example.com", FieldKind::Text);
+        assert_eq!(note.with_signin_as_username(), note, "only logins");
+    }
+
+    #[test]
+    fn only_something_at_something_reads_as_an_address() {
+        assert!(looks_like_email("me@example.com"));
+        for not in [
+            "alice",
+            "@example.com",
+            "me@",
+            "me @example.com",
+            "a@b@c",
+            "",
+        ] {
+            assert!(!looks_like_email(not), "{not:?}");
+        }
     }
 }

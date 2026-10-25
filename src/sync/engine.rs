@@ -204,6 +204,18 @@ fn note_equivalents<'n>(
     }
 }
 
+/// A Proton record as a pair of `layout` takes it: from layout 1, a
+/// login's username is what one signs in with
+/// (`Record::with_signin_as_username`). A pair from before reads it as
+/// Proton has it, as its base was made, until it is laid out again.
+fn proton_view(record: &Record, layout: u32) -> Record {
+    if layout >= 1 {
+        record.with_signin_as_username()
+    } else {
+        record.clone()
+    }
+}
+
 fn version_of(raw: &RawItem) -> u64 {
     raw.0.get("version").and_then(|v| v.as_u64()).unwrap_or(0)
 }
@@ -244,8 +256,8 @@ impl Engine<'_> {
         self.forget_settled_copies(&runs);
         self.copy_to_op(&runs, &unpaired_proton, &proton_items)?;
         self.copy_to_proton(&runs, &unpaired_op, &op_items)?;
+        self.relayout(&mut runs, &standings, &moved)?;
         self.update_pairs(&mut runs, &standings, &moved)?;
-        self.relayout(&runs, &standings, &moved)?;
         self.delete_vanished(&runs, &standings, &moved)?;
         Ok(())
     }
@@ -672,7 +684,9 @@ impl Engine<'_> {
                         runs[*run].proton.id != pair.proton_share
                             && proton_items.get(&(*run, id.clone())).is_some_and(|item| {
                                 item.record.kind == pair.kind
-                                    && item.record.field_hashes(self.key) == expected
+                                    && proton_view(&item.record, pair.op_layout)
+                                        .field_hashes(self.key)
+                                        == expected
                             })
                     });
                     let Some(position) = found else { continue };
@@ -828,7 +842,7 @@ impl Engine<'_> {
                 .collect();
             let content_matches = |id: &String| {
                 proton_items.get(&(run, id.clone())).is_some_and(|item| {
-                    let proton_hashes = item.record.field_hashes(self.key);
+                    let proton_hashes = proton_view(&item.record, OP_LAYOUT).field_hashes(self.key);
                     let names: BTreeSet<&String> =
                         proton_hashes.keys().chain(op_hashes.keys()).collect();
                     item.record.kind == op_item.record.kind
@@ -877,7 +891,8 @@ impl Engine<'_> {
                 continue;
             }
             if ours_lost && let Some(proton) = proton_items.get(&(run, proton_id.clone())) {
-                let mut pair = self.copied_pair(&runs[run], &proton_id, &proton.record, op_item);
+                let record = proton_view(&proton.record, OP_LAYOUT);
+                let mut pair = self.copied_pair(&runs[run], &proton_id, &record, op_item);
                 // Its reply was lost: a version past the first is a change
                 // pq-sync did not see.
                 pair.op_guarded |= version_of(&op_item.raw) > 1;
@@ -890,7 +905,7 @@ impl Engine<'_> {
             }
             let proton_hashes = proton_items
                 .get(&(run, proton_id.clone()))
-                .map(|item| item.record.field_hashes(self.key))
+                .map(|item| proton_view(&item.record, OP_LAYOUT).field_hashes(self.key))
                 .unwrap_or_default();
             let mut base = proton_hashes.clone();
             let mut proton_missing = BTreeSet::new();
@@ -971,11 +986,12 @@ impl Engine<'_> {
                 self.state.pending.push(intent.clone());
                 self.persist()?;
             }
-            let json = op_json::create_json(&item.record, &proton_ref(&target.proton.id, id));
+            let record = proton_view(&item.record, OP_LAYOUT);
+            let json = op_json::create_json(&record, &proton_ref(&target.proton.id, id));
             match self.op.create(&target.op.id, &json) {
                 Ok(created) => {
                     self.op_writes += 1;
-                    let pair = self.copied_pair(target, id, &item.record, &created);
+                    let pair = self.copied_pair(target, id, &record, &created);
                     self.state.pending.retain(|p| *p != intent);
                     self.state.items.push(pair);
                     self.report.push(Event::CreatedInOp {
@@ -1071,7 +1087,7 @@ impl Engine<'_> {
             let missing: BTreeSet<String> = template.missing.iter().cloned().collect();
             // How Proton stored it; failing that, what was sent.
             let proton_hashes = match self.proton.view(&target.proton.id, &proton_id) {
-                Ok(Some(created)) => created.record.field_hashes(self.key),
+                Ok(Some(created)) => proton_view(&created.record, OP_LAYOUT).field_hashes(self.key),
                 _ => op_hashes
                     .iter()
                     .filter(|(name, _)| !missing.contains(*name))
@@ -1117,6 +1133,148 @@ impl Engine<'_> {
         Ok(())
     }
 
+    /// Bring pairs from an older layout to `OP_LAYOUT`, once, before they
+    /// are merged. Layout 1 takes a Proton login's sign-in (its username,
+    /// or else its email) as its username: only a login whose base holds an
+    /// email and no username reads otherwise, and its 1Password item, which
+    /// an older pq-sync left with an empty username and the email in its
+    /// own section, gets the email in its username field. That is done only
+    /// where both sides are as the last run left them and nothing is
+    /// pending on those fields; anything else stays at its old layout,
+    /// read as before, for a later run.
+    fn relayout(
+        &mut self,
+        runs: &mut [VaultRun],
+        standings: &[Option<Standing>],
+        moved: &BTreeSet<usize>,
+    ) -> Result<()> {
+        let fields = BTreeSet::from(["username".to_string(), "email".to_string()]);
+        // Saved at once after an edit; otherwise once at the end.
+        let mut unsaved = false;
+        for (index, standing) in standings.iter().enumerate() {
+            if *standing != Some(Standing::Present) || moved.contains(&index) {
+                continue;
+            }
+            let mut pair = self.state.items[index].clone();
+            if pair.op_layout >= OP_LAYOUT {
+                continue;
+            }
+            let Some(run) = Self::run_of(runs, &pair) else {
+                continue;
+            };
+            let reads_otherwise = pair.kind == Kind::Login
+                && pair.base.contains_key("email")
+                && !pair.base.contains_key("username");
+            if !reads_otherwise {
+                if !self.config.dry_run {
+                    self.state.items[index].op_layout = OP_LAYOUT;
+                    unsaved = true;
+                }
+                continue;
+            }
+            let pending = ["username", "email", "!username", "!email"]
+                .iter()
+                .any(|key| pair.reported.contains_key(*key))
+                || fields.iter().any(|key| pair.equivalents.contains_key(key));
+            if run.proton_items[&pair.proton_item].modified != pair.proton_modified
+                || run.op_items[&pair.op_item].version != pair.op_version
+                || pending
+            {
+                continue;
+            }
+            let title = run.proton_items[&pair.proton_item].title.clone();
+            if !self.op_allows(op_requests::ITEM_GET, false) {
+                break;
+            }
+            let item = match self.op.get(&pair.op_vault, &pair.op_item) {
+                Ok(Some(item)) => item,
+                Ok(None) => continue,
+                Err(e) => {
+                    self.op_failed(e, &title)?;
+                    continue;
+                }
+            };
+            // Changed since the listing, or not as pq-sync left it: the
+            // merge, with its guard, takes it from here.
+            let read = item.record.field_hashes(self.key);
+            if version_of(&item.raw) != pair.op_version
+                || read.contains_key("username")
+                || read.get("email") != pair.base.get("email")
+            {
+                continue;
+            }
+            if pair.op_guarded || item.has_files || item.ambiguous {
+                // It may hold what an edit would drop: it stays at its old
+                // layout, and the owner moves the email by hand.
+                if !pair.reported.contains_key("!layout") {
+                    self.report.push(Event::Blocked {
+                        title,
+                        fields: vec!["username".to_string()],
+                    });
+                    if !self.config.dry_run {
+                        pair.reported.insert("!layout".to_string(), String::new());
+                        self.state.items[index] = pair;
+                        unsaved = true;
+                    }
+                }
+                continue;
+            }
+            if self.config.dry_run {
+                self.report.push(Event::UpdatedOp {
+                    title,
+                    fields: names(&fields),
+                });
+                continue;
+            }
+            if !self.op_allows(op_requests::ITEM_EDIT, true) {
+                continue;
+            }
+            let laid = item.record.with_signin_as_username();
+            let mut raw = item.raw.clone();
+            if let Err(e) = op_json::apply_edit(&mut raw, &laid, &fields) {
+                self.report.push(Event::ItemFailed {
+                    title,
+                    error: format!("{e:#}"),
+                });
+                continue;
+            }
+            match self.op.edit(&pair.op_vault, &pair.op_item, &raw) {
+                Ok(edited) => {
+                    self.op_writes += 1;
+                    let laid_hashes = laid.field_hashes(self.key);
+                    pair.base.remove("email");
+                    if let Some(hash) = laid_hashes.get("username") {
+                        pair.base.insert("username".to_string(), hash.clone());
+                    }
+                    let after = edited.record.field_hashes(self.key);
+                    note_equivalents(&mut pair.equivalents, &fields, &laid_hashes, &after);
+                    pair.op_version = version_of(&edited.raw);
+                    pair.op_layout = OP_LAYOUT;
+                    // The merge after this compares with the listing: it
+                    // must not take pq-sync's own edit for someone else's.
+                    if let Some(run) = runs.iter_mut().find(|run| {
+                        run.proton.id == pair.proton_share && run.op.id == pair.op_vault
+                    }) && let Some(listed) = run.op_items.get_mut(&pair.op_item)
+                    {
+                        listed.version = pair.op_version;
+                    }
+                    self.report.push(Event::UpdatedOp {
+                        title,
+                        fields: names(&fields),
+                    });
+                    self.state.items[index] = pair;
+                    self.persist()?;
+                    unsaved = false;
+                }
+                Err(e) => self.op_failed(e, &title)?,
+            }
+        }
+        if unsaved {
+            self.persist()?;
+        }
+        Ok(())
+    }
+
     fn update_pairs(
         &mut self,
         runs: &mut [VaultRun],
@@ -1144,8 +1302,9 @@ impl Engine<'_> {
             let proton_hashes = if proton_changed {
                 match self.proton.view(&pair.proton_share, &pair.proton_item) {
                     Ok(Some(item)) if item.active => {
-                        let hashes = item.record.field_hashes(self.key);
-                        proton_record = Some(item.record);
+                        let record = proton_view(&item.record, pair.op_layout);
+                        let hashes = record.field_hashes(self.key);
+                        proton_record = Some(record);
                         hashes
                     }
                     // Gone since the listing: the next run sees it.
@@ -1229,18 +1388,12 @@ impl Engine<'_> {
                         self.op_writes += 1;
                         wrote = true;
                         let after = edited.record.field_hashes(self.key);
-                        // Also a field the edit moved without writing it (a
-                        // login's username and email are laid out together).
-                        let before = item.record.field_hashes(self.key);
-                        let mut noted = plan.write_to_op.clone();
-                        noted.extend(
-                            after
-                                .keys()
-                                .chain(before.keys())
-                                .filter(|name| after.get(*name) != before.get(*name))
-                                .cloned(),
+                        note_equivalents(
+                            &mut pair.equivalents,
+                            &plan.write_to_op,
+                            &proton_hashes,
+                            &after,
                         );
-                        note_equivalents(&mut pair.equivalents, &noted, &proton_hashes, &after);
                         pair.op_version = version_of(&edited.raw);
                         self.report.push(Event::UpdatedOp {
                             title: title.clone(),
@@ -1347,126 +1500,6 @@ impl Engine<'_> {
         }
         let hashes = translate(item.record.field_hashes(self.key), &pair.equivalents);
         Ok(Some((item, hashes)))
-    }
-
-    /// Lay out again, once, the 1Password items of pairs from an older
-    /// layout (`OP_LAYOUT`): a login whose email is its only sign-in name
-    /// gets it in 1Password's username field. Only an item pq-sync left as
-    /// it is (its version unchanged) is laid out; the values stay, so Proton
-    /// sees no change. What 1Password now reads differently, because of how
-    /// pq-sync reads a layout, is recorded as an equivalent.
-    fn relayout(
-        &mut self,
-        runs: &[VaultRun],
-        standings: &[Option<Standing>],
-        moved: &BTreeSet<usize>,
-    ) -> Result<()> {
-        let login_keys =
-            op_json::written_keys(Kind::Login, &BTreeSet::from(["username".to_string()]));
-        // Saved at once after an edit; otherwise once at the end.
-        let mut unsaved = false;
-        for (index, standing) in standings.iter().enumerate() {
-            if *standing != Some(Standing::Present) || moved.contains(&index) {
-                continue;
-            }
-            let mut pair = self.state.items[index].clone();
-            if pair.op_layout >= OP_LAYOUT {
-                continue;
-            }
-            let Some(run) = Self::run_of(runs, &pair) else {
-                continue;
-            };
-            let listed = run.op_items[&pair.op_item].version;
-            let mut edited_now = false;
-            if pair.kind != Kind::Login {
-                pair.op_layout = OP_LAYOUT;
-            } else if listed == pair.op_version {
-                let title = run.proton_items[&pair.proton_item].title.clone();
-                if !self.op_allows(op_requests::ITEM_GET, false) {
-                    break;
-                }
-                let item = match self.op.get(&pair.op_vault, &pair.op_item) {
-                    Ok(Some(item)) => item,
-                    Ok(None) => continue,
-                    Err(e) => {
-                        self.op_failed(e, &title)?;
-                        continue;
-                    }
-                };
-                // What pq-sync took 1Password to hold, in Proton's form.
-                let expected = Self::op_side_of(&pair);
-                let read = item.record.field_hashes(self.key);
-                note_equivalents(&mut pair.equivalents, &login_keys, &expected, &read);
-                if op_json::needs_relayout(&item) {
-                    if pair.op_guarded || item.has_files || item.ambiguous {
-                        // It may hold what an edit would drop: the owner
-                        // moves the email into the username by hand.
-                        self.report.push(Event::Blocked {
-                            title,
-                            fields: vec!["username".to_string()],
-                        });
-                    } else if self.config.dry_run {
-                        self.report.push(Event::UpdatedOp {
-                            title,
-                            fields: names(&login_keys),
-                        });
-                        continue;
-                    } else {
-                        if !self.op_allows(op_requests::ITEM_EDIT, true) {
-                            continue;
-                        }
-                        let mut raw = item.raw.clone();
-                        if let Err(e) = op_json::apply_edit(&mut raw, &item.record, &login_keys) {
-                            self.report.push(Event::ItemFailed {
-                                title,
-                                error: format!("{e:#}"),
-                            });
-                            continue;
-                        }
-                        match self.op.edit(&pair.op_vault, &pair.op_item, &raw) {
-                            Ok(edited) => {
-                                self.op_writes += 1;
-                                let after = edited.record.field_hashes(self.key);
-                                note_equivalents(
-                                    &mut pair.equivalents,
-                                    &login_keys,
-                                    &expected,
-                                    &after,
-                                );
-                                pair.op_version = version_of(&edited.raw);
-                                edited_now = true;
-                                self.report.push(Event::UpdatedOp {
-                                    title,
-                                    fields: names(&login_keys),
-                                });
-                            }
-                            Err(e) => {
-                                self.op_failed(e, &title)?;
-                                continue;
-                            }
-                        }
-                    }
-                }
-                pair.op_layout = OP_LAYOUT;
-            } else {
-                // Changed in 1Password since: the next run, once the change
-                // is taken in, lays it out.
-                continue;
-            }
-            if !self.config.dry_run {
-                self.state.items[index] = pair;
-                if edited_now {
-                    self.persist()?;
-                    unsaved = false;
-                } else {
-                    unsaved = true;
-                }
-            }
-        }
-        if unsaved {
-            self.persist()?;
-        }
-        Ok(())
     }
 
     fn delete_vanished(
