@@ -97,12 +97,14 @@ impl Record {
         }
     }
 
-    /// Set the URL list (empty entries dropped, order kept).
+    /// Set the URL list: empty entries dropped, each URL once (where it
+    /// first appears), order kept.
     pub fn set_urls<S: AsRef<str>>(&mut self, urls: &[S]) {
+        let mut seen = std::collections::BTreeSet::new();
         let joined = urls
             .iter()
             .map(|url| url.as_ref().trim())
-            .filter(|url| !url.is_empty())
+            .filter(|url| !url.is_empty() && seen.insert(*url))
             .collect::<Vec<_>>()
             .join("\n");
         self.set("urls", joined, FieldKind::Urls);
@@ -290,7 +292,12 @@ mod tests {
     #[test]
     fn urls_keep_order_and_drop_blanks() {
         let mut record = Record::new(Kind::Login);
-        record.set_urls(&["https://b.example", " ", "https://a.example "]);
+        record.set_urls(&[
+            "https://b.example",
+            " ",
+            "https://a.example ",
+            "https://b.example",
+        ]);
         assert_eq!(record.urls(), ["https://b.example", "https://a.example"]);
         record.set_urls::<&str>(&[]);
         assert!(record.get("urls").is_none());

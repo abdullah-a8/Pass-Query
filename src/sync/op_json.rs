@@ -1463,4 +1463,19 @@ mod tests {
             ["https://b.example", "https://c.example"]
         );
     }
+
+    #[test]
+    fn a_proton_url_listed_twice_gives_an_editable_copy() {
+        let mut record = login_record();
+        record.set_urls(&[
+            "https://a.example",
+            "https://b.example",
+            "https://a.example",
+        ]);
+        assert_eq!(record.urls(), ["https://a.example", "https://b.example"]);
+        let returned = as_returned(&create_json(&record, "s/i"), json!([]));
+        let item = parse_item(&returned).unwrap().unwrap();
+        assert!(!item.ambiguous);
+        assert_eq!(item.record, record);
+    }
 }
