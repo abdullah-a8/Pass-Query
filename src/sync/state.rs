@@ -24,6 +24,11 @@ use crate::private_file::{ensure_private_dir, read_private, write_private};
 /// not misread.
 pub const STATE_FORMAT_VERSION: u32 = 1;
 
+/// How pq-sync lays a pair's 1Password item out. A pair from an older
+/// layout is read and laid out again once (see `engine::relayout`):
+/// - 1: a login's email is its username when it has no username.
+pub const OP_LAYOUT: u32 = 1;
+
 /// How long recorded 1Password requests count against the daily budget.
 const DAY_SECONDS: u64 = 24 * 60 * 60;
 
@@ -102,6 +107,10 @@ pub struct ItemPair {
     /// difference is not read as a change and written again every run.
     #[serde(default)]
     pub equivalents: BTreeMap<String, Equivalent>,
+    /// The `OP_LAYOUT` the 1Password item was last laid out with; 0 for
+    /// pairs from before layouts were counted.
+    #[serde(default)]
+    pub op_layout: u32,
 }
 
 /// One field's value as each side stores it, by hash ("" when absent).
@@ -226,6 +235,7 @@ mod tests {
             op_guarded: false,
             reported: BTreeMap::new(),
             equivalents: BTreeMap::new(),
+            op_layout: OP_LAYOUT,
         }
     }
 
